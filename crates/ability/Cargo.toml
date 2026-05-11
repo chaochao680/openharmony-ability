@@ -13,6 +13,7 @@ webview = ["dep:ohos-web-binding", "dep:http"]
 [dependencies]
 # common dependencies
 futures-channel = "0.3"
+log = "0.4"
 
 # for napi binding
 napi-ohos = { workspace = true, features = ["napi8"] }
