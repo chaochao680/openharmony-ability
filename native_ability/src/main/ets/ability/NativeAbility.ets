@@ -2,9 +2,17 @@ import { AbilityConstant, Configuration, UIAbility, Want } from "@kit.AbilityKit
 import common from "@ohos.app.ability.common";
 import window from "@ohos.window";
 import webview from "@ohos.web.webview";
-import * as Entry from "../components/MainPage";
+import { hilog } from '@kit.PerformanceAnalysisKit';
+import { deviceInfo } from '@kit.BasicServicesKit';
+import { RouteName } from "../components/MainPage";
+import { setMenuClickHandler, setMenuBarRecoverFn, getMenuDataCallback } from "../components/MenuBarComponent";
 import { AbilityInitContext, ApplicationLifecycle, Module } from "./type";
 import { Loadable } from "../helper/loadable";
+import { MenuManager, PredefinedActionExecutor, setPredefinedActionExecutor } from "../helper/menu";
+import { AboutMetadataData } from "../helper/menu_types";
+import { setCurrentAbilityName } from "../helper/StatusBarUtils";
+import { WindowManager } from "../window/WindowManager";
+import { setPrimaryWebviewControllerCallback } from "../components/DefaultXComponent";
 
 export const STATE_KEY = "ohos.rs.ability.application.state";
 
@@ -60,16 +68,25 @@ export class NativeAbility extends UIAbility {
       preferredLocales: context?.config?.language ?? "",
       moduleName,
       resourceManager: context?.resourceManager,
+      sdkApiVersion: deviceInfo.sdkApiVersion,
+      distributionOSApiVersion: deviceInfo.distributionOSApiVersion,
     };
   }
 
   async onCreate(want: Want, launchParam: AbilityConstant.LaunchParam): Promise<void> {
+    setCurrentAbilityName(want.abilityName ?? "");
+
     const isRestore: boolean =
       (want.parameters?.["ohos.ability.params.abilityRecoveryRestart"] as boolean) ?? false;
     const state = isRestore ? ((want.parameters?.[STATE_KEY] as string) ?? "") : "";
 
+    hilog.info(0x0000, 'NativeAbility', 'onCreate - moduleName: %{public}s', JSON.stringify(this.moduleName));
     AppStorage.setOrCreate("moduleName", this.moduleName);
     AppStorage.setOrCreate("loadMode", this.loadMode);
+
+    // Initialize WindowManager for multi-window support
+    const context = this.context as common.UIAbilityContext;
+    WindowManager.init(context);
 
     const requestedModules: string[] = this.resolveModuleNames();
     const restoredStateMap: Record<string, string> = this.parseSavedStateMap(state);
@@ -108,8 +125,103 @@ export class NativeAbility extends UIAbility {
     }
   }
 
+  private setupMenuPopup(windowStage: window.WindowStage): void {
+    const primaryModule: ESObject = this.nativeModules[0] as ESObject;
+    if (!primaryModule || typeof primaryModule.onMenuRequest !== 'function') {
+      return;
+    }
+
+    AppStorage.setOrCreate("__openharmony_ability_is_desktop__", primaryModule.isDesktopDevice());
+
+    const emitMenuEventFn: (menuId: string, windowId?: string) => void = primaryModule.emitMenuEvent as (menuId: string, windowId?: string) => void;
+
+    const executor = new PredefinedActionExecutor((code: number) => {
+      this.context?.terminateSelf();
+    });
+    const mainWindow = windowStage.getMainWindowSync();
+    executor.setWindow(mainWindow, 0); // 0 = main window
+    setPredefinedActionExecutor(executor);
+    executor.setShowAboutFn((metadata: AboutMetadataData) => {
+      const appName = metadata.name ?? '';
+      const appVersion = metadata.version ?? '';
+      const appCopyright = metadata.copyright ?? '';
+      const appAuthors = metadata.authors?.join(', ') ?? '';
+      const appComments = metadata.comments ?? '';
+      const appWebsite = metadata.website ?? '';
+
+      const lines: string[] = [];
+      if (appName) lines.push(appName);
+      if (appVersion) lines.push(`Version: ${appVersion}`);
+      if (appCopyright) lines.push(appCopyright);
+      if (appAuthors) lines.push(`Authors: ${appAuthors}`);
+      if (appComments) lines.push(appComments);
+      if (appWebsite) lines.push(appWebsite);
+      const message = lines.join('\n');
+      const title = appName || 'About';
+
+      try {
+        const uiContext = mainWindow.getUIContext();
+        uiContext.showAlertDialog({
+          title: title,
+          message: message,
+          autoCancel: true,
+          confirm: {
+            value: 'OK',
+            action: () => {},
+          },
+        });
+      } catch (_) {}
+    });
+
+    const menuManager = new MenuManager(executor, emitMenuEventFn);
+
+    // Wire up per-window menu click handler (MW-1): routes through MenuManager for predefined/custom actions
+    setMenuClickHandler(0, (item) => {
+      menuManager.handleItemClick(item);
+    });
+
+    // Wire up per-window recover function (MW-1)
+    setMenuBarRecoverFn(0, () => {
+      mainWindow.recover();
+    });
+
+    setPrimaryWebviewControllerCallback((controller: webview.WebviewController) => {
+      executor.setController(controller);
+    });
+
+    // Route menu requests via callback (MW-5) instead of AppStorage
+    primaryModule.onMenuRequest((data: { jsonData: string; x?: number; y?: number; visible?: boolean; windowId?: string }) => {
+      const windowId = data.windowId ?? "main";
+
+      // Handle menubar visibility changes via callback
+      if (data.visible !== undefined && data.visible !== null) {
+        const cb = getMenuDataCallback(windowId);
+        cb?.onMenubarVisible?.(data.visible);
+        primaryModule.notifyMenubarVisibility(windowId, data.visible);
+        return;
+      }
+
+      // Handle popup menu requests via callback
+      if (data.x !== undefined && data.y !== undefined) {
+        try {
+          menuManager.popupFromJson(data.jsonData, data.x ?? 0, data.y ?? 0, windowId);
+        } catch (e) {
+          console.error(`[Menu] Popup failed: ${e}`);
+        }
+        return;
+      }
+
+      // Handle menubar JSON updates via callback
+      const cb = getMenuDataCallback(windowId);
+      cb?.onMenubarJson?.(data.jsonData);
+    });
+  }
+
   async onWindowStageCreate(windowStage: window.WindowStage): Promise<void> {
     this.forEachLifecycle((lifecycle) => lifecycle.windowStageEventCallback.onWindowStageCreate());
+
+    // Pass windowStage to WindowManager for createSubWindow support
+    WindowManager.getInstance().setWindowStage(windowStage);
 
     try {
       windowStage.on("windowStageEvent", (event: window.WindowStageEventType) => {
@@ -134,6 +246,10 @@ export class NativeAbility extends UIAbility {
           );
         });
         win.on("windowRectChange", (options: window.RectChangeOptions) => {
+          if (options.reason === window.RectChangeReason.RECOVER) {
+            const cb = getMenuDataCallback("main");
+            cb?.onMenubarVisible?.(true);
+          }
           this.forEachLifecycle((lifecycle) =>
             lifecycle.windowStageEventCallback.onWindowRectChange(options),
           );
@@ -153,9 +269,19 @@ export class NativeAbility extends UIAbility {
 
     if (this.defaultPage) {
       try {
-        await windowStage.loadContentByName(Entry.RouteName);
+        await windowStage.loadContentByName(RouteName);
       } catch (_) {}
     }
+
+    try {
+      this.setupMenuPopup(windowStage);
+    } catch (menuErr) {
+      console.error(`[Menu] setupMenuPopup threw: ${menuErr}`);
+    }
+  }
+
+  onWindowStageDestroy(): void | Promise<void> {
+    this.forEachLifecycle((lifecycle) => lifecycle.windowStageEventCallback.onWindowStageDestroy());
   }
 
   onMemoryLevel(level: AbilityConstant.MemoryLevel): void {
@@ -164,6 +290,12 @@ export class NativeAbility extends UIAbility {
 
   onDestroy(): void | Promise<void> {
     this.forEachLifecycle((lifecycle) => lifecycle.windowStageEventCallback.onAbilityDestroy());
+  }
+
+  onNewWant(want: Want, launchParam: AbilityConstant.LaunchParam): void {
+    const uri = want.uri ?? '';
+    hilog.info(0x0000, 'NativeAbility', 'onNewWant - uri: %{public}s', uri);
+    this.forEachLifecycle((lifecycle) => lifecycle.windowStageEventCallback.onNewWant(uri));
   }
 
   onConfigurationUpdate(newConfig: Configuration): void {

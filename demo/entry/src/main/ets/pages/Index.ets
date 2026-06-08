@@ -1,4 +1,5 @@
 import { DefaultXComponent } from "@ohos-rs/ability";
+import { router } from '@kit.ArkUI';
 import {
   demoRequestPermissionFromMainThread,
   handleChange,
@@ -65,7 +66,7 @@ struct Index {
           })
         Button("background red")
           .onClick(() => {
-            setBackgroundColor("red");
+            setBackgroundColor(0xFFFF0000);
           })
         Button(this.webviewVisible ? "hide webview" : "show webview")
           .onClick(() => this.handleToggleWebviewVisible())
@@ -78,6 +79,15 @@ struct Index {
 
   build() {
     Column({ space: 16 }) {
+      Row({ space: 12 }) {
+        Button("🔍 Transparency Test")
+          .fontSize(12)
+          .backgroundColor('#FF6B00')
+          .onClick(() => {
+            router.pushUrl({ url: 'pages/TransparencyTest' });
+          })
+      }.width("100%")
+
       Row({ space: 12 }) {
         this.DemoSwitcher("XComponent demo", 0)
         this.DemoSwitcher("WebView demo", 1)

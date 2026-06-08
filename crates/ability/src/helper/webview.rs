@@ -21,7 +21,7 @@ pub struct WebViewStyle {
     pub x: Option<Either<f64, String>>,
     pub y: Option<Either<f64, String>>,
     pub visible: Option<bool>,
-    pub background_color: Option<String>,
+    pub background_color: Option<u32>,
 }
 
 #[napi(object)]
@@ -39,6 +39,7 @@ type OnDownloadEnd<'a> = Option<Function<'a, (String, Option<String>, bool), ()>
 pub struct WebViewInitData<'a> {
     pub url: Option<String>,
     pub id: Option<String>,
+    pub window_id: Option<i64>,
     pub style: Option<WebViewStyle>,
     pub javascript_enabled: Option<bool>,
     pub devtools: Option<bool>,
@@ -54,6 +55,8 @@ pub struct WebViewInitData<'a> {
     pub on_download_end: OnDownloadEnd<'a>,
     pub on_navigation_request: Option<Function<'a, String, bool>>,
     pub on_title_change: Option<Function<'a, String, ()>>,
+    pub on_page_begin: Option<Function<'a, String, ()>>,
+    pub on_page_end: Option<Function<'a, String, ()>>,
 }
 
 #[derive(Clone)]
@@ -205,7 +208,7 @@ impl Webview {
                 )?;
 
             let cb = env.create_function_from_closure("evaluate_js_callback", move |ctx| {
-                let ret = ctx.try_get::<String>(1)?;
+                let ret = ctx.try_get::<String>(0)?;
                 let ret = match ret {
                     Either::A(s) => s,
                     Either::B(_ret) => String::from("undefined"),
@@ -235,15 +238,22 @@ impl Webview {
         }
     }
 
-    pub fn set_background_color(&self, color: &str) -> Result<()> {
+    pub fn set_background_color(&self, color: u32) -> Result<()> {
+        log::debug!("[openharmony-ability] set_background_color(0x{:08X})", color);
         if let Some(env) = get_main_thread_env().borrow().as_ref() {
             let set_background_color_js_function = self
                 .inner
                 .get_value(env)?
-                .get_named_property::<Function<'_, String, ()>>("setBackgroundColor")?;
-            set_background_color_js_function.call(color.to_string())?;
-            Ok(())
+                .get_named_property::<Function<'_, u32, ()>>("setBackgroundColor")?;
+            match set_background_color_js_function.call(color) {
+                Ok(_) => Ok(()),
+                Err(e) => {
+                    log::error!("[openharmony-ability] setBackgroundColor failed: {:?}", e);
+                    Err(e)
+                }
+            }
         } else {
+            log::error!("[openharmony-ability] Failed to get main thread env");
             Err(Error::from_reason("Failed to get main thread env"))
         }
     }
@@ -330,7 +340,7 @@ impl Webview {
     pub fn custom_protocol<S, F>(&self, protocol: S, callback: F) -> Result<()>
     where
         S: Into<String>,
-        F: Fn(&str, Request<Vec<u8>>, bool) -> Option<Response<Cow<'static, [u8]>>>,
+        F: Fn(&str, Request<Vec<u8>>, bool) -> Option<Response<Cow<'static, [u8]>>> + 'static,
     {
         self.custom_protocol_async(protocol, move |url, request, is_main_frame, responder| {
             let response = callback(url, request, is_main_frame);
@@ -343,10 +353,10 @@ impl Webview {
     pub fn custom_protocol_async<S, F>(&self, protocol: S, callback: F) -> Result<()>
     where
         S: Into<String>,
-        F: Fn(&str, Request<Vec<u8>>, bool, CustomProtocolResponder),
+        F: Fn(&str, Request<Vec<u8>>, bool, CustomProtocolResponder) + 'static,
     {
         let handle = CustomProtocolHandler::new();
-        let cbs = Box::leak(Box::new(callback));
+        let cbs: &'static F = Box::leak(Box::new(callback));
         let cbs = Arc::new(Mutex::new(cbs));
 
         handle.on_request_start(move |req, req_handle| {
@@ -409,7 +419,8 @@ impl Webview {
                             }),
                         };
 
-                        cbs.lock().unwrap()(&url, request, req.is_main_frame(), responder);
+                        let cb = *cbs.lock().unwrap();
+                        cb(&url, request, req.is_main_frame(), responder);
                     });
                 }
                 None => {
@@ -451,7 +462,8 @@ impl Webview {
                             req_handle.finish();
                         }),
                     };
-                    cbs.lock().unwrap()(&url, request, req.is_main_frame(), responder);
+                    let cb = *cbs.lock().unwrap();
+                    cb(&url, request, req.is_main_frame(), responder);
                 }
             }
 
