@@ -133,21 +133,21 @@ pub fn can_i_use(syscap: &str) -> bool {
     let env_cell = get_main_thread_env();
     let env_borrow = env_cell.borrow();
     let Some(env) = env_borrow.as_ref() else {
-        log::warn!("can_i_use: NAPI environment not available, returning false");
+        crate::warn!("can_i_use: NAPI environment not available, returning false");
         return false;
     };
 
     let helper_cell = unsafe { get_helper() };
     let helper_borrow = helper_cell.borrow();
     let Some(helper_ref) = helper_borrow.as_ref() else {
-        log::warn!("can_i_use: ArkHelper not initialized, returning false");
+        crate::warn!("can_i_use: ArkHelper not initialized, returning false");
         return false;
     };
 
     let helper_obj = match helper_ref.get_value(env) {
         Ok(obj) => obj,
         Err(e) => {
-            log::warn!("can_i_use: Failed to get helper object: {:?}", e);
+            crate::warn!("can_i_use: Failed to get helper object: {:?}", e);
             return false;
         }
     };
@@ -156,7 +156,7 @@ pub fn can_i_use(syscap: &str) -> bool {
     {
         Ok(f) => f,
         Err(e) => {
-            log::warn!("can_i_use: Failed to get checkCanIUse function: {:?}", e);
+            crate::warn!("can_i_use: Failed to get checkCanIUse function: {:?}", e);
             return false;
         }
     };
@@ -164,7 +164,7 @@ pub fn can_i_use(syscap: &str) -> bool {
     match check_fn.call(syscap.to_string()) {
         Ok(result) => result,
         Err(e) => {
-            log::warn!("can_i_use: NAPI call failed for '{}': {:?}", syscap, e);
+            crate::warn!("can_i_use: NAPI call failed for '{}': {:?}", syscap, e);
             false
         }
     }

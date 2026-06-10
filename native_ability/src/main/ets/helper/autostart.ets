@@ -2,11 +2,10 @@ import common from "@ohos.app.ability.common";
 import { autoStartupManager, Want } from "@kit.AbilityKit";
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { BusinessError } from "@kit.BasicServicesKit";
-
-const DOMAIN: number = 0x1999;
+import { DOMAIN } from './constants';
 
 /**
- * Navigate to the system "应用启动管理" (App Startup Management) settings page.
+ * Navigate to the system "App Startup Management" settings page.
  *
  * OHOS does not allow ordinary apps to programmatically enable/disable autostart.
  * This function opens the settings page so the user can manually toggle the switch.

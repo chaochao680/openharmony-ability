@@ -196,7 +196,13 @@ fn build_add_args(env: Env, data: AddStatusBarData) -> Result<(Object<'static>, 
     let menu_obj: Option<Vec<Vec<Object<'static>>>> = data.menu_json
         .as_ref()
         .map(|json| {
-            let menus: Vec<Vec<StatusBarMenuItem>> = serde_json::from_str(json).unwrap_or_default();
+            let menus: Vec<Vec<StatusBarMenuItem>> = match serde_json::from_str(json) {
+                Ok(m) => m,
+                Err(e) => {
+                    crate::error!("[StatusBar] menu JSON parse error in build_add_args: {}", e);
+                    Vec::new()
+                }
+            };
             menus.iter().map(|group| {
                 group.iter()
                     .filter_map(|item| build_menu_item_object_static(&env, item).ok())
@@ -220,7 +226,13 @@ fn build_update_icon_args(env: Env, data: UpdateIconData) -> Result<(Object<'sta
 
 fn build_update_menu_args(env: Env, data: UpdateMenuData) -> Result<(Vec<Vec<Object<'static>>>,)> {
     let groups: Vec<Vec<Object<'static>>> = {
-        let menus: Vec<Vec<StatusBarMenuItem>> = serde_json::from_str(&data.menu_json).unwrap_or_default();
+        let menus: Vec<Vec<StatusBarMenuItem>> = match serde_json::from_str(&data.menu_json) {
+            Ok(m) => m,
+            Err(e) => {
+                crate::error!("[StatusBar] menu JSON parse error in build_update_menu_args: {}", e);
+                Vec::new()
+            }
+        };
         menus.iter().map(|group| {
             group.iter()
                 .filter_map(|item| build_menu_item_object_static(&env, item).ok())

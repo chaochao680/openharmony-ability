@@ -3,8 +3,7 @@ import { updateManager } from "@kit.AppGalleryKit";
 import { bundleManager } from "@kit.AbilityKit";
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { BusinessError } from "@kit.BasicServicesKit";
-
-const DOMAIN: number = 0x1999;
+import { DOMAIN } from './constants';
 
 export interface CheckResult {
   updateAvailable: boolean;

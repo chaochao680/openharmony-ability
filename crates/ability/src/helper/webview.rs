@@ -239,7 +239,7 @@ impl Webview {
     }
 
     pub fn set_background_color(&self, color: u32) -> Result<()> {
-        log::debug!("[openharmony-ability] set_background_color(0x{:08X})", color);
+        crate::debug!("[openharmony-ability] set_background_color(0x{:08X})", color);
         if let Some(env) = get_main_thread_env().borrow().as_ref() {
             let set_background_color_js_function = self
                 .inner
@@ -248,12 +248,12 @@ impl Webview {
             match set_background_color_js_function.call(color) {
                 Ok(_) => Ok(()),
                 Err(e) => {
-                    log::error!("[openharmony-ability] setBackgroundColor failed: {:?}", e);
+                    crate::error!("[openharmony-ability] setBackgroundColor failed: {:?}", e);
                     Err(e)
                 }
             }
         } else {
-            log::error!("[openharmony-ability] Failed to get main thread env");
+            crate::error!("[openharmony-ability] Failed to get main thread env");
             Err(Error::from_reason("Failed to get main thread env"))
         }
     }

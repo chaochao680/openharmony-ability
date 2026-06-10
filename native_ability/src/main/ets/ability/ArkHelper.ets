@@ -33,19 +33,18 @@ import {
 } from "../helper/StatusBarUtils";
 import { ConfigurationConstant } from '@kit.AbilityKit';
 import { primaryWebviewControllerCallback, clearPrimaryWebviewControllerCallback } from "../components/DefaultXComponent";
-
-const DOMAIN: number = 0x1999;
+import { DOMAIN } from '../helper/constants';
 
 /**
- * 全局 ArkHelper 工厂函数
- * 
- * 设计原则：
- * - 不依赖任何组件实例的 this 指针
- * - 所有窗口相关资源通过 WindowManager 统一管理
- * - UIContext 从 WindowManager 按 windowId 获取
+ * Global ArkHelper factory function.
+ *
+ * Design principles:
+ * - Does not depend on any component instance's `this` pointer
+ * - All window-related resources are managed centrally via WindowManager
+ * - UIContext is obtained from WindowManager by windowId
  */
 export function createArkHelper(): ArkHelper {
-  // 每个窗口的 EmbeddedWebviewManager 实例按 windowId 管理
+  // Per-window EmbeddedWebviewManager instances, keyed by windowId
   const embeddedManagers: Map<number, EmbeddedWebviewManager> = new Map();
 
   const getEmbeddedManager = (windowId: number): EmbeddedWebviewManager => {
@@ -63,7 +62,7 @@ export function createArkHelper(): ArkHelper {
   const getUIAbilityContext = (): common.UIAbilityContext | null => {
     try {
       const wm = WindowManager.getInstance();
-      // 优先从主窗口 (windowId=0) 获取 context
+      // Prefer main window (windowId=0) for context
       const uiCtx = wm.getUIContext(0);
       if (uiCtx) {
         return uiCtx.getHostContext() as common.UIAbilityContext;
@@ -139,14 +138,14 @@ export function createArkHelper(): ArkHelper {
         let win: window.Window | null = null;
 
         if (windowId === 0) {
-          // 主窗口
+          // Main window
           hilog.info(DOMAIN, 'ArkHelper', 'Getting avoid area for MAIN window');
           const context = getUIAbilityContext();
           if (context) {
             win = context.windowStage.getMainWindowSync();
           }
         } else {
-          // 子窗口
+          // Sub-window
           hilog.info(DOMAIN, 'ArkHelper', 'Getting avoid area for SUB window: %{public}d', windowId);
           try {
             const wm = WindowManager.getInstance();
@@ -177,7 +176,7 @@ export function createArkHelper(): ArkHelper {
         const windowId = data.windowId ?? 0;
         hilog.info(DOMAIN, 'ArkHelper', 'createWebview called with windowId: %{public}d, url: %{public}s', windowId, data.url || 'null');
         
-        // 1. 严格根据 windowId 查找 Controller
+        // 1. Look up Controller strictly by windowId
         let targetController: RustWebviewNodeController | null = null;
         try {
           const wm = WindowManager.getInstance();
@@ -186,7 +185,7 @@ export function createArkHelper(): ArkHelper {
           hilog.error(DOMAIN, 'ArkHelper', 'Failed to get WindowManager: %{public}s', JSON.stringify(e));
         }
 
-        // 2. 准备 Init 数据
+        // 2. Prepare Init data
         const rawInitScripts: string[] = data?.initializationScripts || [];
 
         const initScripts: ScriptItem[] = rawInitScripts.map((i) => {
@@ -235,20 +234,20 @@ export function createArkHelper(): ArkHelper {
           init.style.backgroundColor = Color.Transparent;
         }
 
-        // 3. 如果 Controller 未就绪，创建代理并入队
+        // 3. If Controller not ready, create proxy and enqueue
         if (!targetController) {
           hilog.warn(DOMAIN, 'ArkHelper', 'Controller not ready for window %{public}d. Creating proxy.', windowId);
           try {
             const wm = WindowManager.getInstance();
             wm.queueWebviewInit(windowId, init);
             
-            // 创建轻量级代理对象返回给 Rust
+            // Create lightweight proxy object to return to Rust
             const proxy = new ProxyJsHelper();
             wm.registerPendingJsHelperProxy(windowId, proxy);
             return proxy;
           } catch (e) {
             hilog.error(DOMAIN, 'ArkHelper', 'Failed to queue init or create proxy: %{public}s', JSON.stringify(e));
-            // 极端异常下返回 ProxyJsHelper 兜底，操作被缓存而非丢失 TODO:rust侧处理错误
+            // Fallback: return ProxyJsHelper under extreme errors; operations are cached, not lost. TODO: handle errors on Rust side
             const fallbackProxy = new ProxyJsHelper();
             try {
               const wmFallback = WindowManager.getInstance();
@@ -261,7 +260,7 @@ export function createArkHelper(): ArkHelper {
           }
         }
 
-        // 4. 正常创建
+        // 4. Normal creation path
         const ret = targetController.addWebview(init);
         if (primaryWebviewControllerCallback && init.controller) {
           primaryWebviewControllerCallback(init.controller);
@@ -423,9 +422,9 @@ export function createArkHelper(): ArkHelper {
     },
 
     addToStatusBarWithRgba: (iconsRgba: StatusBarIconRgba, iconSize: number, quickOperation: ESObject, statusBarGroupMenu?: ESObject[][], hoverTips?: string) => {
-      console.info(`[StatusBar] addToStatusBarWithRgba called: iconSize=${iconSize}, hasWhite=${!!(iconsRgba.white)}, whiteLen=${iconsRgba.white?.length ?? 0}, hasBlack=${!!(iconsRgba.black)}, blackLen=${iconsRgba.black?.length ?? 0}`);
+      hilog.info(DOMAIN, 'ArkHelper',`[StatusBar] addToStatusBarWithRgba called: iconSize=${iconSize}, hasWhite=${!!(iconsRgba.white)}, whiteLen=${iconsRgba.white?.length ?? 0}, hasBlack=${!!(iconsRgba.black)}, blackLen=${iconsRgba.black?.length ?? 0}`);
       const context = getAbilityContext();
-      if (!context) { console.error('[StatusBar] no context'); return; }
+      if (!context) { hilog.error(DOMAIN, 'ArkHelper','[StatusBar] no context'); return; }
       // NOTE: Do NOT auto-fill abilityName when it's empty string.
       // Per OHOS docs: abilityName="" means "no QuickOperation panel, fire statusBarIconClick event instead".
       // Only fill when abilityName is explicitly undefined/null (not empty string).
@@ -436,14 +435,14 @@ export function createArkHelper(): ArkHelper {
       if (iconsRgba.white && iconsRgba.white.length > 0) {
         const pm = createPixelMapFromRgba(iconsRgba.white, iconSize);
         if (pm) icons.white = pm;
-        console.info(`[StatusBar] white PixelMap: ${pm ? 'OK' : 'NULL'}`);
+        hilog.info(DOMAIN, 'ArkHelper',`[StatusBar] white PixelMap: ${pm ? 'OK' : 'NULL'}`);
       }
       if (iconsRgba.black && iconsRgba.black.length > 0) {
         const pm = createPixelMapFromRgba(iconsRgba.black, iconSize);
         if (pm) icons.black = pm;
-        console.info(`[StatusBar] black PixelMap: ${pm ? 'OK' : 'NULL'}`);
+        hilog.info(DOMAIN, 'ArkHelper',`[StatusBar] black PixelMap: ${pm ? 'OK' : 'NULL'}`);
       }
-      if (Object.keys(icons).length === 0) { console.error('[StatusBar] no valid icons, aborting'); return; }
+      if (Object.keys(icons).length === 0) { hilog.error(DOMAIN, 'ArkHelper','[StatusBar] no valid icons, aborting'); return; }
       const opts: ESObject = {
         icons: icons,
         quickOperation: quickOperation,
@@ -464,7 +463,7 @@ export function createArkHelper(): ArkHelper {
         reRegisterStatusBarClickHandlers();
       } catch (e) {
         const err = e as BusinessError;
-        console.error(`[StatusBar] addToStatusBar failed: ${err.code} ${err.message}`);
+        hilog.error(DOMAIN, 'ArkHelper',`[StatusBar] addToStatusBar failed: ${err.code} ${err.message}`);
       }
     },
 
@@ -485,16 +484,16 @@ export function createArkHelper(): ArkHelper {
         statusBarManager.updateStatusBarIcon(context, icons);
       } catch (e) {
         const err = e as BusinessError;
-        console.error(`[StatusBar] updateStatusBarIcon failed: ${err.code} ${err.message}`);
+        hilog.error(DOMAIN, 'ArkHelper',`[StatusBar] updateStatusBarIcon failed: ${err.code} ${err.message}`);
       }
     },
 
     registerIconClickHandler: (eventName: string, callback: Callback<emitter.EventData>) => {
-      console.info(`[StatusBar] registerIconClickHandler: legacy call (using _onIconClick instead)`);
+      hilog.info(DOMAIN, 'ArkHelper',`[StatusBar] registerIconClickHandler: legacy call (using _onIconClick instead)`);
     },
 
     registerMenuClickHandler: (eventName: string, callback: Callback<emitter.EventData>) => {
-      console.info(`[StatusBar] registerMenuClickHandler: legacy call (using _onMenuClick instead)`);
+      hilog.info(DOMAIN, 'ArkHelper',`[StatusBar] registerMenuClickHandler: legacy call (using _onMenuClick instead)`);
     },
 
     unregisterIconClickHandler: (eventName: string) => {
@@ -514,7 +513,7 @@ export function createArkHelper(): ArkHelper {
         statusBarManager.updateStatusBarMenu(context, statusBarGroupMenu);
       } catch (e) {
         const err = e as BusinessError;
-        console.error(`[StatusBar] updateStatusBarMenu failed: ${err.code} ${err.message}`);
+        hilog.error(DOMAIN, 'ArkHelper',`[StatusBar] updateStatusBarMenu failed: ${err.code} ${err.message}`);
       }
     },
 
@@ -525,7 +524,7 @@ export function createArkHelper(): ArkHelper {
         statusBarManager.updateStatusBarHoverTips(context, hoverTips);
       } catch (e) {
         const err = e as BusinessError;
-        console.error(`[StatusBar] updateStatusBarHoverTips failed: ${err.code} ${err.message}`);
+        hilog.error(DOMAIN, 'ArkHelper',`[StatusBar] updateStatusBarHoverTips failed: ${err.code} ${err.message}`);
       }
     },
 
@@ -536,7 +535,7 @@ export function createArkHelper(): ArkHelper {
         statusBarManager.removeFromStatusBar(context);
       } catch (e) {
         const err = e as BusinessError;
-        console.error(`[StatusBar] removeFromStatusBar failed: ${err.code} ${err.message}`);
+        hilog.error(DOMAIN, 'ArkHelper',`[StatusBar] removeFromStatusBar failed: ${err.code} ${err.message}`);
       }
     },
 
@@ -575,8 +574,12 @@ export function createArkHelper(): ArkHelper {
         // which calls back into Rust. If we're already in a NAPI call from Rust,
         // this creates a deadlock on the main thread.
         setTimeout(() => {
-          context!.getApplicationContext().setColorMode(colorMode);
-          hilog.info(DOMAIN, 'ArkHelper', 'setColorMode: applied mode %{public}d', mode);
+          try {
+            context!.getApplicationContext().setColorMode(colorMode);
+            hilog.info(DOMAIN, 'ArkHelper', 'setColorMode: applied mode %{public}d', mode);
+          } catch (err) {
+            hilog.error(DOMAIN, 'ArkHelper', 'setColorMode deferred callback failed (ability may be destroyed): %{public}s', String(err));
+          }
         }, 0);
       } catch (err) {
         hilog.error(DOMAIN, 'ArkHelper', 'setColorMode failed: %{public}s', JSON.stringify(err));

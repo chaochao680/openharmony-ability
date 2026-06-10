@@ -1,19 +1,18 @@
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import webview from "@ohos.web.webview";
-
-const DOMAIN: number = 0x1999;
+import { DOMAIN } from '../helper/constants';
 
 export const getCookies = (url: string): string => {
   return webview.WebCookieManager.fetchCookieSync(url);
 };
 
 /**
- * 将 wry 传入的 `#RRGGBBAA` 格式转换为 OHOS 接受的 `#AARRGGBB` 格式。
- * 支持 string、Color 枚举、number undefined 三种输入：
- * - Color 枚举直接透传
- * - number（0xAARRGGBB）：alpha=0 时转为 Color.Transparent（OHOS Web 组件要求）
- * - undefined 返回 undefined
- * - 仅转换 `#RRGGBBAA` 格式的字符串（如 `#FF000080`）
+ * Convert `#RRGGBBAA` format from wry to `#AARRGGBB` format accepted by OHOS.
+ * Supports string, Color enum, number, and undefined inputs:
+ * - Color enum: passed through as-is
+ * - number (0xAARRGGBB): alpha=0 is converted to Color.Transparent (OHOS Web component requirement)
+ * - undefined: returns undefined
+ * - Only converts `#RRGGBBAA` format strings (e.g. `#FF000080`)
  */
 export function convertRRGGBBAAtoAARRGGBB(color: string | Color | number | undefined): string | Color | number | undefined {
   if (color === undefined) return undefined;
@@ -54,15 +53,16 @@ export interface JsHelper {
 }
 
 /**
- * 轻量级代理类：解决 Rust 侧在窗口未就绪时拿到空引用的问题。
- * 初始时缓存所有操作，待真实 Controller 绑定后自动重放。
+ * Lightweight proxy class: solves the problem of Rust receiving a null reference
+ * when the window is not yet ready. Caches all operations initially and replays
+ * them automatically once the real Controller is bound.
  */
 export class ProxyJsHelper implements JsHelper {
   private realController: JsHelper | null = null;
   private pendingOperations: Array<() => void> = [];
 
   /**
-   * 绑定真实 Controller 并重放所有缓存操作
+   * Bind the real Controller and replay all cached operations
    */
   bindToRealController(real: JsHelper): void {
     hilog.info(DOMAIN, 'ProxyJsHelper', 'Binding real controller and replaying pending operations.');
@@ -73,7 +73,7 @@ export class ProxyJsHelper implements JsHelper {
     hilog.info(DOMAIN, 'ProxyJsHelper', `Replayed ${ops.length} operations.`);
   }
 
-  // --- JsHelper 接口实现 ---
+  // --- JsHelper interface implementation ---
 
   getCookies(url: string): string {
     return this.realController ? this.realController.getCookies(url) : '';

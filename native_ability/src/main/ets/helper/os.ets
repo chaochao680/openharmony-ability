@@ -3,8 +3,7 @@ import common from "@ohos.app.ability.common";
 import { appRecovery } from '@kit.AbilityKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { WindowManager } from "../window/WindowManager";
-
-const DOMAIN: number = 0x1999;
+import { DOMAIN } from './constants';
 
 /**
  * exit current application

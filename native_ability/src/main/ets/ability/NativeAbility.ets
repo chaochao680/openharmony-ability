@@ -12,6 +12,7 @@ import { MenuManager, PredefinedActionExecutor, setPredefinedActionExecutor } fr
 import { AboutMetadataData } from "../helper/menu_types";
 import { setCurrentAbilityName } from "../helper/StatusBarUtils";
 import { WindowManager } from "../window/WindowManager";
+import { DOMAIN } from '../helper/constants';
 import { setPrimaryWebviewControllerCallback } from "../components/DefaultXComponent";
 
 export const STATE_KEY = "ohos.rs.ability.application.state";
@@ -37,7 +38,9 @@ export class NativeAbility extends UIAbility {
     for (const lifecycle of this.lifecycles) {
       try {
         handler(lifecycle);
-      } catch (_) {}
+      } catch (e) {
+        hilog.error(DOMAIN, 'NativeAbility', 'Lifecycle callback error: %{public}s', String(e));
+      }
     }
   }
 
@@ -55,7 +58,8 @@ export class NativeAbility extends UIAbility {
         mapped[key] = typeof value === "string" ? value : String(value);
       }
       return mapped;
-    } catch (_) {
+    } catch (e) {
+      hilog.warn(DOMAIN, 'NativeAbility', 'State map parse failed: %{public}s', String(e));
       return {};
     }
   }
@@ -80,7 +84,7 @@ export class NativeAbility extends UIAbility {
       (want.parameters?.["ohos.ability.params.abilityRecoveryRestart"] as boolean) ?? false;
     const state = isRestore ? ((want.parameters?.[STATE_KEY] as string) ?? "") : "";
 
-    hilog.info(0x0000, 'NativeAbility', 'onCreate - moduleName: %{public}s', JSON.stringify(this.moduleName));
+    hilog.info(DOMAIN, 'NativeAbility', 'onCreate - moduleName: %{public}s', JSON.stringify(this.moduleName));
     AppStorage.setOrCreate("moduleName", this.moduleName);
     AppStorage.setOrCreate("loadMode", this.loadMode);
 
@@ -121,7 +125,9 @@ export class NativeAbility extends UIAbility {
       const restoredState = restoredStateMap[moduleName] ?? state;
       try {
         lifecycle.windowStageEventCallback.onAbilityCreate(restoredState);
-      } catch (_) {}
+      } catch (e) {
+        hilog.error(DOMAIN, 'NativeAbility', 'onAbilityCreate failed: %{public}s', String(e));
+      }
     }
   }
 
@@ -139,7 +145,7 @@ export class NativeAbility extends UIAbility {
       this.context?.terminateSelf();
     });
     const mainWindow = windowStage.getMainWindowSync();
-    executor.setWindow(mainWindow, 0); // 0 = main window
+    executor.setWindow(mainWindow);
     setPredefinedActionExecutor(executor);
     executor.setShowAboutFn((metadata: AboutMetadataData) => {
       const appName = metadata.name ?? '';
@@ -170,7 +176,9 @@ export class NativeAbility extends UIAbility {
             action: () => {},
           },
         });
-      } catch (_) {}
+      } catch (e) {
+        hilog.error(DOMAIN, 'NativeAbility', 'Show about dialog failed: %{public}s', String(e));
+      }
     });
 
     const menuManager = new MenuManager(executor, emitMenuEventFn);
@@ -229,12 +237,15 @@ export class NativeAbility extends UIAbility {
           lifecycle.windowStageEventCallback.onWindowStageEvent(event),
         );
       });
-    } catch (_) {}
+    } catch (e) {
+      hilog.error(DOMAIN, 'NativeAbility', 'windowStage.on failed: %{public}s', String(e));
+    }
 
     let win: window.Window | null = null;
     try {
       win = await windowStage.getMainWindow();
-    } catch (_) {
+    } catch (e) {
+      hilog.error(DOMAIN, 'NativeAbility', 'getMainWindow failed: %{public}s', String(e));
       win = null;
     }
 
@@ -264,13 +275,17 @@ export class NativeAbility extends UIAbility {
             lifecycle.keyboardEventCallback.onKeyboardHeightChange(height),
           );
         });
-      } catch (_) {}
+      } catch (e) {
+        hilog.error(DOMAIN, 'NativeAbility', 'Window event registration failed: %{public}s', String(e));
+      }
     }
 
     if (this.defaultPage) {
       try {
         await windowStage.loadContentByName(RouteName);
-      } catch (_) {}
+      } catch (e) {
+        hilog.error(DOMAIN, 'NativeAbility', 'loadContentByName failed: %{public}s', String(e));
+      }
     }
 
     try {
@@ -282,6 +297,11 @@ export class NativeAbility extends UIAbility {
 
   onWindowStageDestroy(): void | Promise<void> {
     this.forEachLifecycle((lifecycle) => lifecycle.windowStageEventCallback.onWindowStageDestroy());
+    try {
+      WindowManager.getInstance().removeWindow(0);
+    } catch (e) {
+      hilog.error(DOMAIN, 'NativeAbility', 'onWindowStageDestroy cleanup failed: %{public}s', String(e));
+    }
   }
 
   onMemoryLevel(level: AbilityConstant.MemoryLevel): void {
@@ -294,7 +314,7 @@ export class NativeAbility extends UIAbility {
 
   onNewWant(want: Want, launchParam: AbilityConstant.LaunchParam): void {
     const uri = want.uri ?? '';
-    hilog.info(0x0000, 'NativeAbility', 'onNewWant - uri: %{public}s', uri);
+    hilog.info(DOMAIN, 'NativeAbility', 'onNewWant - uri: %{public}s', uri);
     this.forEachLifecycle((lifecycle) => lifecycle.windowStageEventCallback.onNewWant(uri));
   }
 
@@ -319,7 +339,9 @@ export class NativeAbility extends UIAbility {
 
       try {
         stateMap[moduleName] = lifecycle.windowStageEventCallback.onAbilitySaveState() ?? "";
-      } catch (_) {}
+      } catch (e) {
+        hilog.error(DOMAIN, 'NativeAbility', 'onAbilitySaveState failed: %{public}s', String(e));
+      }
     }
 
     const stateValues = Object.values(stateMap);

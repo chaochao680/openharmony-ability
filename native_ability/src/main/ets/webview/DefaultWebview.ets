@@ -8,8 +8,7 @@ import { getCookies, JsHelper, convertRRGGBBAAtoAARRGGBB } from "./Utils";
 import { WebHeader } from "@kit.ArkUI";
 import { router } from '@kit.ArkUI';
 import { WindowManager } from '../window/WindowManager';
-
-const DOMAIN: number = 0x1999;
+import { DOMAIN } from '../helper/constants';
 
 export interface WebviewStyle {
   x?: number | string;
@@ -70,6 +69,11 @@ function WebBuilder(data: WebviewNodeData) {
     .javaScriptOnDocumentStart(data?.initializationScripts)
     .onControllerAttached(() => {
       hilog.info(DOMAIN, 'DefaultWebview', 'onControllerAttached fired');
+      // Guard against repeated onControllerAttached calls (re-render or system events)
+      if (data.didInitialLoad === true) {
+        return;
+      }
+      data.didInitialLoad = true;
       const ctrl = data.controller;
       // Set up download delegate after controller is attached
       setupDownloadDelegate(data);
@@ -89,21 +93,15 @@ function WebBuilder(data: WebviewNodeData) {
     .onErrorReceive((event) => {
       hilog.error(DOMAIN, 'DefaultWebview', 'Web onErrorReceive: %{public}s', JSON.stringify(event));
       if (event.error) {
+        // Only replace page content for main frame errors; ignore sub-resource errors
+        if (!event.request.isMainFrame()) {
+          hilog.warn(DOMAIN, 'DefaultWebview', 'Sub-resource error ignored, code: %{public}d', event.error.getErrorCode());
+          return;
+        }
         const ctrl = data.controller;
         const errorCode = event.error.getErrorCode();
         const errorInfo = event.error.getErrorInfo();
-        hilog.error(DOMAIN, 'DefaultWebview', 'Frame load failed: %{public}d - %{public}s', errorCode, errorInfo);
-
-        // Check current URL to determine if this is an iframe error
-        const currentUrl = ctrl.getUrl();
-        hilog.info(DOMAIN, 'DefaultWebview', 'Current URL when error: %{public}s', currentUrl);
-
-        // If current URL is tauri://localhost, main page loaded successfully,
-        // this error is from an iframe (like isolation://), ignore it
-        if (currentUrl && currentUrl.startsWith('tauri://localhost')) {
-          hilog.warn(DOMAIN, 'DefaultWebview', 'Main page loaded, ignoring iframe error');
-          return;
-        }
+        hilog.error(DOMAIN, 'DefaultWebview', 'Main frame load failed: %{public}d - %{public}s', errorCode, errorInfo);
 
         const errorHtml = `
           <html>
@@ -216,6 +214,10 @@ function EmbeddedWebBuilder(data: WebviewNodeData) {
       .onErrorReceive((event) => {
         hilog.error(DOMAIN, 'DefaultWebview', 'Embedded Web onErrorReceive: %{public}s', JSON.stringify(event));
         if (event.error) {
+          if (!event.request.isMainFrame()) {
+            hilog.warn(DOMAIN, 'DefaultWebview', 'Embedded sub-resource error ignored, code: %{public}d', event.error.getErrorCode());
+            return;
+          }
           const ctrl = data.controller;
           const errorCode = event.error.getErrorCode();
           const errorInfo = event.error.getErrorInfo();

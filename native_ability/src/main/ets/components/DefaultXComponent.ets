@@ -28,8 +28,7 @@ import {
   emitter,
   BusinessError,
 } from "../helper/StatusBarUtils";
-
-const DOMAIN: number = 0x1999;
+import { DOMAIN } from '../helper/constants';
 
 export const RouteName = "NativeAbility";
 
@@ -47,19 +46,19 @@ export function clearPrimaryWebviewControllerCallback(): void {
 
 @Component
 export struct DefaultXComponent {
-  // 主窗口模式：moduleName 不为空
+  // Main window mode: moduleName is non-empty
   @Prop moduleName: string = "";
-  // 子窗口模式：windowId 不为 0
+  // Sub-window mode: windowId is non-zero
   @Prop windowId: number = 0;
 
   private rootSlot = new NodeContent();
   private webviewController: RustWebviewNodeController | null = null;
   private nativeModule: ESObject;
 
-  // 全局 ArkHelper 实例（窗口无关）
+  // Global ArkHelper instance (window-agnostic)
   private helper: ArkHelper = createArkHelper();
 
-  // 判断是否为主窗口的函数：基于 windowId 判断
+  // Check if this is the main window based on windowId
   private isMainWindow(): boolean {
     const result = this.windowId === 0;
     hilog.info(DOMAIN, 'DefaultXComponent', 'isMainWindow() called: windowId=%{public}d, result=%{public}b', 
@@ -67,9 +66,24 @@ export struct DefaultXComponent {
     return result;
   }
 
-  @StorageProp("loadMode") loadMode: "async" | "sync" = "async";
+  // loadMode is read only once in aboutToAppear; no need for @StorageProp reactive binding
+  private loadMode: "async" | "sync" = "async";
+
+  aboutToDisappear(): void {
+    hilog.info(DOMAIN, 'DefaultXComponent', 'aboutToDisappear for windowId: %{public}d', this.windowId);
+    // Clean up this window's controller and UIContext from WindowManager
+    try {
+      const wm = WindowManager.getInstance();
+      wm.removeControllerAndUIContext(this.windowId);
+    } catch (e) {
+      hilog.warn(DOMAIN, 'DefaultXComponent', 'aboutToDisappear cleanup failed: %{public}s', String(e));
+    }
+    this.webviewController = null;
+  }
 
   async aboutToAppear(): Promise<void> {
+    // Read loadMode once from AppStorage (avoids reactive re-render on AppStorage changes)
+    this.loadMode = (AppStorage.get<string>("loadMode") as "async" | "sync") ?? "async";
     hilog.info(DOMAIN, 'DefaultXComponent', '=== aboutToAppear START ===');
     hilog.info(DOMAIN, 'DefaultXComponent', 'Props -> moduleName: "%{public}s", windowId: %{public}d',
       this.moduleName, this.windowId);
@@ -85,7 +99,7 @@ export struct DefaultXComponent {
     }
 
     try {
-      // 注册 UIContext 到 WindowManager
+      // Register UIContext to WindowManager
       const uiCtx = this.getUIContext();
       if (uiCtx) {
         try {
@@ -97,12 +111,12 @@ export struct DefaultXComponent {
         }
       }
 
-      // 初始化 webviewController
+      // Initialize webviewController
       this.webviewController = new RustWebviewNodeController(uiCtx);
       hilog.info(DOMAIN, 'DefaultXComponent', 'RustWebviewNodeController created');
 
       if (this.isMainWindow()) {
-        // 主窗口模式：调用 render 设置 helper 和 XComponent
+        // Main window mode: call render to set up helper and XComponent
         hilog.info(DOMAIN, 'DefaultXComponent', 'Entering MAIN WINDOW logic');
         const moduleName = this.moduleName.trim();
         if (!moduleName) {
@@ -117,7 +131,7 @@ export struct DefaultXComponent {
         this.nativeModule.render(this.helper, this.rootSlot);
         hilog.info(DOMAIN, 'DefaultXComponent', 'render() completed');
 
-        // 注册主窗口到 WindowManager (id=0)
+        // Register main window to WindowManager (id=0)
         try {
           const wm = WindowManager.getInstance();
           wm.registerController(0, this.webviewController);
@@ -127,7 +141,7 @@ export struct DefaultXComponent {
             JSON.stringify(err));
         }
       } else {
-        // 子窗口模式：注册到 WindowManager
+        // Sub-window mode: register to WindowManager
         hilog.info(DOMAIN, 'DefaultXComponent', 'Entering SUB WINDOW logic');
         if (this.windowId === 0) {
           hilog.error(DOMAIN, 'DefaultXComponent', 'windowId is 0 but not main window, this should not happen');
