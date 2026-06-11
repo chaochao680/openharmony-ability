@@ -77,6 +77,14 @@ function WebBuilder(data: WebviewNodeData) {
       const ctrl = data.controller;
       // Set up download delegate after controller is attached
       setupDownloadDelegate(data);
+      // Set custom User-Agent if provided
+      if (data.userAgent) {
+        try {
+          ctrl.setCustomUserAgent(data.userAgent);
+        } catch (error) {
+          hilog.error(DOMAIN, 'DefaultWebview', 'setCustomUserAgent failed: %{public}s', JSON.stringify(error));
+        }
+      }
       // load url or html string
       if (data?.url) {
         const header: WebHeader[] = Object.keys(
@@ -199,6 +207,14 @@ function EmbeddedWebBuilder(data: WebviewNodeData) {
         const ctrl = data.controller;
         // Set up download delegate after controller is attached
         setupDownloadDelegate(data);
+        // Set custom User-Agent if provided
+        if (data.userAgent) {
+          try {
+            ctrl.setCustomUserAgent(data.userAgent);
+          } catch (error) {
+            hilog.error(DOMAIN, 'DefaultWebview', 'setCustomUserAgent failed: %{public}s', JSON.stringify(error));
+          }
+        }
         if (data?.url) {
           const header: WebHeader[] = Object.keys(
             (data?.headers || {}) as Record<string, string>,
