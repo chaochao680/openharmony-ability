@@ -282,9 +282,16 @@ impl OpenHarmonyAppInner {
             napi_ohos::threadsafe_function::ThreadsafeFunctionCallMode::NonBlocking,
             move |result: std::result::Result<napi_ohos::bindgen_prelude::Unknown<'static>, napi_ohos::Error>, _env| {
                 let code = match result {
-                    Ok(unknown) => unsafe { unknown.cast::<i32>().unwrap_or(-1) },
+                    Ok(unknown) => {
+                        if unknown.get_type().ok() == Some(napi_ohos::ValueType::Number) {
+                            unsafe { unknown.cast::<i32>().unwrap_or(-1) }
+                        } else {
+                            crate::error!("restart TSFN returned non-number type");
+                            -1
+                        }
+                    }
                     Err(e) => {
-                        eprintln!("restart TSFN callback error: {}", e);
+                        crate::error!("restart TSFN callback error: {}", e);
                         -1
                     }
                 };
@@ -556,6 +563,7 @@ impl OpenHarmonyApp {
     }
 
     /// Get an updater handle for checking and installing updates via AppGallery.
+    #[cfg(feature = "updater")]
     pub fn updater(&self) -> super::updater::Updater {
         super::updater::Updater
     }

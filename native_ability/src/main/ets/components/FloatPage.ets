@@ -11,8 +11,7 @@ import { hilog } from '@kit.PerformanceAnalysisKit';
 import { window as arkWindow, CursorController } from '@kit.ArkUI';
 import { display } from '@kit.ArkUI';
 import { WindowManager } from '../window/WindowManager';
-
-const DOMAIN: number = 0x1999;
+import { DOMAIN } from '../helper/constants';
 
 export const RouteName = "FloatWindow";
 
@@ -93,6 +92,16 @@ struct FloatPage {
     }
   }
 
+  aboutToDisappear(): void {
+    hilog.info(DOMAIN, 'FloatPage', 'aboutToDisappear for windowId: %{public}d', this.windowId);
+    // Safety net: ensure WindowManager resources are cleaned up even if the close button's destroyWindow path was not triggered
+    try {
+      WindowManager.getInstance().removeWindow(this.windowId);
+    } catch (e) {
+      hilog.warn(DOMAIN, 'FloatPage', 'aboutToDisappear removeWindow failed: %{public}s', String(e));
+    }
+  }
+
   build() {
     Stack() {
       Column() {
@@ -118,10 +127,10 @@ struct FloatPage {
                 .height(40);
 
               Button() {
-                Text('×')
-                  .fontSize(20)
-                  .fontColor('#666666')
-                  .fontWeight(FontWeight.Bold);
+                Image($r('sys.media.ohos_ic_public_cancel'))
+                  .width(20)
+                  .height(20)
+                  .fillColor('#666666');
               }
               .width(32)
               .height(32)

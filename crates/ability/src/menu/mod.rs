@@ -163,7 +163,7 @@ pub fn set_menubar_visible(visible: bool, window_id: String) -> Result<()> {
 /// NAPI API: Register unified menu callback from ArkTS
 #[napi(ts_args_type = "callback: (data: MenuRequestData) => void")]
 pub fn on_menu_request(callback: Function<'static>) -> Result<()> {
-    log::debug!("[Menu] on_menu_request called from ArkTS");
+    crate::debug!("[Menu] on_menu_request called from ArkTS");
     let tsfn: MenuTsfn = callback
         .build_threadsafe_function::<MenuRequestData>()
         .callee_handled::<false>()
@@ -175,7 +175,7 @@ pub fn on_menu_request(callback: Function<'static>) -> Result<()> {
     if let Ok(buffer) = LAST_MENUBAR_JSON.lock() {
         for (window_id, json_data) in buffer.iter() {
             if !json_data.is_empty() {
-                log::debug!("[Menu] replaying buffered menubar for window_id={}", window_id);
+                crate::debug!("[Menu] replaying buffered menubar for window_id={}", window_id);
                 let data = MenuRequestData {
                     json_data: json_data.clone(),
                     x: None,
@@ -190,7 +190,7 @@ pub fn on_menu_request(callback: Function<'static>) -> Result<()> {
 
     let mut guard = MENU_CALLBACK.lock().map_err(|_| Error::from_reason("lock poisoned"))?;
     *guard = Some(tsfn);
-    log::debug!("[Menu] on_menu_request: callback registered successfully");
+    crate::debug!("[Menu] on_menu_request: callback registered successfully");
     Ok(())
 }
 
@@ -202,12 +202,12 @@ pub fn on_popup_request(callback: Function<'static>) -> Result<()> {
 
 /// Start background thread to forward menu requests to ArkTS (unified)
 pub fn start_menu_forwarder() {
-    log::debug!("[Menu] start_menu_forwarder called");
+    crate::debug!("[Menu] start_menu_forwarder called");
     std::thread::spawn(|| {
-        log::debug!("[Menu] forwarder thread started");
+        crate::debug!("[Menu] forwarder thread started");
         let receiver = menu_request_receiver();
         while let Ok(req) = receiver.recv() {
-            log::debug!("[Menu] forwarder received request, json_len={}, window_id={}", req.json_data.len(), req.window_id);
+            crate::debug!("[Menu] forwarder received request, json_len={}, window_id={}", req.json_data.len(), req.window_id);
             let guard = MENU_CALLBACK.lock().ok();
             if let Some(tsfn) = guard.as_ref().and_then(|opt| opt.as_ref()) {
                 let data = MenuRequestData {
@@ -217,10 +217,10 @@ pub fn start_menu_forwarder() {
                     visible: req.visible,
                     window_id: Some(req.window_id),
                 };
-                log::debug!("[Menu] calling TSFN with x={:?}, y={:?}, visible={:?}, window_id={:?}", data.x, data.y, data.visible, data.window_id);
+                crate::debug!("[Menu] calling TSFN with x={:?}, y={:?}, visible={:?}, window_id={:?}", data.x, data.y, data.visible, data.window_id);
                 tsfn.call(data, ThreadsafeFunctionCallMode::NonBlocking);
             } else {
-                log::debug!("[Menu] forwarder: MENU_CALLBACK is None");
+                crate::debug!("[Menu] forwarder: MENU_CALLBACK is None");
             }
         }
     });
@@ -233,7 +233,7 @@ pub fn start_popup_forwarder() {
 
 /// Rust API: Popup context menu (for muda) — x/y coordinates present
 pub fn popup_context_menu(json_data: String, x: Option<f64>, y: Option<f64>, window_id: String) -> Result<()> {
-    log::debug!("[Menu] popup_context_menu called: x={x:?}, y={y:?}, window_id={window_id}, json_len={}", json_data.len());
+    crate::debug!("[Menu] popup_context_menu called: x={x:?}, y={y:?}, window_id={window_id}, json_len={}", json_data.len());
     MENU_CHANNEL.0.send(MenuRequest { json_data, x, y, visible: None, window_id }).ok();
     Ok(())
 }
@@ -241,7 +241,7 @@ pub fn popup_context_menu(json_data: String, x: Option<f64>, y: Option<f64>, win
 /// Rust API: Set menu bar JSON (for menubar) — x/y/visible absent
 /// Updates MENU_HAS_CONTENT: false if JSON is "[]", true otherwise
 pub fn set_menu_json(json_data: String, window_id: String) -> Result<()> {
-    log::debug!("[Menu] set_menu_json called: window_id={window_id}, json_len={}", json_data.len());
+    crate::debug!("[Menu] set_menu_json called: window_id={window_id}, json_len={}", json_data.len());
 
     // Track whether menu has content (JSON != "[]")
     let has_content = json_data.trim() != "[]";

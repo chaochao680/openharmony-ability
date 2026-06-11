@@ -6,8 +6,7 @@ import { BusinessError } from '@kit.BasicServicesKit';
 import { RustWebviewNodeController, WebviewInitData } from '../webview/DefaultWebview';
 import { ProxyJsHelper } from '../webview/Utils';
 import * as FloatPage from '../components/FloatPage';
-
-const DOMAIN: number = 0x1999;
+import { DOMAIN } from '../helper/constants';
 
 interface WindowEntry {
   window: window.Window;
@@ -22,12 +21,12 @@ export class WindowManager {
   private controllers: Map<number, RustWebviewNodeController> = new Map();
   private uiContexts: Map<number, UIContext> = new Map();
   
-  // 代理对象队列 (用于在 Controller 就绪前缓存 Rust 操作)
+  // Proxy object queue (caches Rust operations before Controller is ready)
   private pendingJsHelperProxies: Map<number, ProxyJsHelper> = new Map();
   
-  // 待加载 URL 队列
+  // Pending URL queue
   private pendingUrls: Map<number, string> = new Map();
-  // 待初始化 WebView 队列 (解决竞态条件)
+  // Pending WebView init queue (resolves race conditions)
   private pendingInits: Map<number, WebviewInitData> = new Map();
   
   private constructor(context: common.UIAbilityContext) {
@@ -57,13 +56,13 @@ export class WindowManager {
 
   async createSubWindow(name: string, type: number, windowId: number, width: number = 800, height: number = 600, x: number = 100, y: number = 100,
       decorations: boolean = true, transparent: boolean = false, backgroundColor?: number): Promise<number> {
-    // 校验 windowId：子窗口 ID 必须大于 0
+    // Validate windowId: sub-window ID must be greater than 0
     if (windowId <= 0) {
       hilog.error(DOMAIN, 'WindowManager', `Invalid windowId: %{public}d. Sub-window creation requires windowId > 0.`, windowId);
       throw new Error(`Invalid windowId: ${windowId}. Must be greater than 0.`);
     }
 
-    // 检查 windowStage 是否已设置
+    // Check if windowStage has been set
     if (!this.windowStage) {
       hilog.error(DOMAIN, 'WindowManager', 'WindowStage not set. Call setWindowStage() first.');
       throw new Error('WindowStage not set');
@@ -73,7 +72,7 @@ export class WindowManager {
 
     let win: window.Window;
     try {
-      // 使用 windowStage.createSubWindow(name) 替代 window.createWindow(config)
+      // Use windowStage.createSubWindow(name) instead of window.createWindow(config)
       win = await this.windowStage.createSubWindow(name);
       hilog.info(DOMAIN, 'WindowManager', `Sub-window created successfully: %{public}d`, windowId);
     } catch (err) {
@@ -81,7 +80,7 @@ export class WindowManager {
       throw err;
     }
     
-    // 使用 LocalStorage 传递 windowId 和 decorations，确保窗口间隔离
+    // Use LocalStorage to pass windowId and decorations, ensuring isolation between windows
     let storage = new LocalStorage();
     storage.setOrCreate('windowId', windowId);
     storage.setOrCreate('decorations', decorations);
@@ -92,7 +91,7 @@ export class WindowManager {
       await win.loadContentByName(FloatPage.RouteName, storage);
       hilog.info(DOMAIN, 'WindowManager', `UI content loaded successfully for window: %{public}d`, windowId);
       
-      // 注册子窗口的 UIContext
+      // Register sub-window's UIContext
       try {
         const uiCtx = win.getUIContext();
         if (uiCtx) {
@@ -147,35 +146,35 @@ export class WindowManager {
     return windowId;
   }
   
-  // 加载指定 URL 到指定窗口 - 统一使用 addWebview，与主窗口路径一致
+  // Load a URL into the specified window — unified via addWebview, consistent with main window path
   loadUrl(id: number, url: string): void {
     const controller = this.controllers.get(id);
     if (controller) {
       hilog.info(DOMAIN, 'WindowManager', `Loading URL for window ${id}: ${url}`);
-      // 统一调用 addWebview，与主窗口 ArkHelper.createWebview 路径一致
+      // Unified call to addWebview, consistent with main window ArkHelper.createWebview path
       controller.addWebview({ url: url });
-      // 如果加载成功，清除 pending URL
+      // Clear pending URL on successful load
       this.pendingUrls.delete(id);
     } else {
       hilog.warn(DOMAIN, 'WindowManager', `Controller not ready for window ${id}. Queuing URL.`);
-      // 如果控制器还没准备好，将 URL 存入队列，等待 registerController 触发
+      // Controller not ready yet — queue the URL and wait for registerController
       this.pendingUrls.set(id, url);
     }
   }
   
-  // 当页面初始化完成，注册 Controller 时触发加载
+  // Trigger load when page initialization is complete and Controller is registered
   registerController(id: number, controller: RustWebviewNodeController): void {
     hilog.info(DOMAIN, 'WindowManager', `Controller registered for window: %{public}d`, id);
     this.controllers.set(id, controller);
 
-    // 1. 处理暂存的 WebView 初始化请求 (解决竞态条件)
+    // 1. Process pending WebView init requests (resolves race conditions)
     const pendingInit = this.pendingInits.get(id);
     if (pendingInit) {
       hilog.info(DOMAIN, 'WindowManager', `Processing pending init for window ${id}`);
       const result = controller.addWebview(pendingInit);
       this.pendingInits.delete(id);
 
-      // 2. 激活代理 (将真实 Controller 绑定给代理)
+      // 2. Activate proxy (bind real Controller to proxy)
       const proxy = this.takePendingJsHelperProxy(id);
       if (proxy) {
         hilog.info(DOMAIN, 'WindowManager', `Binding real controller to proxy for window ${id}`);
@@ -183,7 +182,7 @@ export class WindowManager {
       }
     }
 
-    // 3. 处理暂存的 URL 加载请求
+    // 3. Process pending URL load requests
     const pendingUrl = this.pendingUrls.get(id);
     if (pendingUrl) {
       hilog.info(DOMAIN, 'WindowManager', `Pending URL found! Triggering load for window ${id}: ${pendingUrl}`);
@@ -194,19 +193,19 @@ export class WindowManager {
     }
   }
   
-  // 将 WebView 初始化请求加入队列
+  // Queue a WebView init request
   queueWebviewInit(id: number, init: WebviewInitData): void {
     hilog.warn(DOMAIN, 'WindowManager', `Controller not ready for window ${id}. Queuing init.`);
     this.pendingInits.set(id, init);
   }
   
-  // 注册代理对象
+  // Register a proxy object
   registerPendingJsHelperProxy(id: number, proxy: ProxyJsHelper): void {
     hilog.info(DOMAIN, 'WindowManager', `Registering pending proxy for window: %{public}d`, id);
     this.pendingJsHelperProxies.set(id, proxy);
   }
 
-  // 获取并移除代理（绑定后不再需要管理）
+  // Get and remove proxy (no longer managed after binding)
   takePendingJsHelperProxy(id: number): ProxyJsHelper | undefined {
     const proxy = this.pendingJsHelperProxies.get(id);
     this.pendingJsHelperProxies.delete(id);
@@ -318,18 +317,26 @@ export class WindowManager {
     return this.controllers.get(id);
   }
 
-  // 注册 UIContext（主窗口在 aboutToAppear 中调用，子窗口在 loadContent 后调用）
+  // Register UIContext (main window calls in aboutToAppear, sub-window calls after loadContent)
   registerUIContext(windowId: number, ctx: UIContext): void {
     hilog.info(DOMAIN, 'WindowManager', `UIContext registered for window: %{public}d`, windowId);
     this.uiContexts.set(windowId, ctx);
   }
 
-  // 获取指定窗口的 UIContext
+  // Get UIContext for the specified window
   getUIContext(windowId: number): UIContext | undefined {
     return this.uiContexts.get(windowId);
   }
 
-  // 移除窗口：清理所有 Map，防止内存泄漏
+  // Clean up controller and UIContext only (used by DefaultXComponent aboutToDisappear)
+  // Does not remove from windows Map (managed by FloatPage's destroyWindow path)
+  removeControllerAndUIContext(windowId: number): void {
+    this.controllers.delete(windowId);
+    this.uiContexts.delete(windowId);
+    hilog.info(DOMAIN, 'WindowManager', 'Controller and UIContext removed for windowId: %{public}d', windowId);
+  }
+
+  // Remove window: clean up all Maps to prevent memory leaks
   removeWindow(windowId: number): void {
     hilog.info(DOMAIN, 'WindowManager', `Removing window %{public}d from all maps`, windowId);
     this.windows.delete(windowId);

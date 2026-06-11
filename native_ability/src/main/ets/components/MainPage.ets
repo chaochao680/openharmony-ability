@@ -9,8 +9,7 @@ import {
 } from "./MenuBarComponent";
 import { KeyCode } from "@kit.InputKit";
 import { hilog } from '@kit.PerformanceAnalysisKit';
-
-const DOMAIN: number = 0x1999;
+import { DOMAIN } from '../helper/constants';
 
 export const RouteName = "NativeAbility";
 
@@ -18,7 +17,9 @@ export const RouteName = "NativeAbility";
 @Component
 struct MainPage {
   @StorageProp("moduleName") moduleNames: string | string[] = "";
-  @StorageProp("loadMode") loadMode: "async" | "sync" = "async";
+
+  // loadMode is immutable after onCreate, no need for @StorageProp reactive binding
+  private loadMode: "async" | "sync" = "async";
 
   @State private nativeModule: ESObject | null = null;
   @State private resolvedModuleName: string = "";
@@ -27,6 +28,7 @@ struct MainPage {
 
   async aboutToAppear(): Promise<void> {
     hilog.info(DOMAIN, 'MainPage', '=== MainPage aboutToAppear START ===');
+    this.loadMode = (AppStorage.get<string>("loadMode") as "async" | "sync") ?? "async";
     hilog.info(DOMAIN, 'MainPage', 'Initializing MAIN WINDOW');
 
     // Main window specific logic: load Native Module

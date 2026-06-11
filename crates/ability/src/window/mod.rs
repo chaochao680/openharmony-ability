@@ -57,25 +57,25 @@ impl Default for WindowCreateParams {
 pub fn create_os_window(params: WindowCreateParams) -> napi_ohos::Result<i64> {
     // 1. Synchronously allocate a unique ID
     let id = NEXT_WINDOW_ID.fetch_add(1, Ordering::SeqCst);
-    log::info!("Pre-allocated window ID: {}", id);
+    crate::info!("Pre-allocated window ID: {}", id);
 
     let ret = unsafe { get_helper() };
     if let Some(h) = ret.borrow().as_ref() {
         if let Some(env) = get_main_thread_env().borrow().as_ref() {
             let obj = h.get_value(env).map_err(|e| {
-                log::error!("Failed to get helper object value: {:?}", e);
+                crate::error!("Failed to get helper object value: {:?}", e);
                 e
             })?;
 
             let func = match obj.get_named_property::<Function<'_, Object, Unknown>>("createOSWindow") {
                 Ok(f) => f,
                 Err(e) => {
-                    log::error!("Property 'createOSWindow' NOT FOUND on helper: {:?}", e);
+                    crate::error!("Property 'createOSWindow' NOT FOUND on helper: {:?}", e);
                     return Err(e);
                 }
             };
 
-            log::info!("Successfully found createOSWindow, building config object...");
+            crate::info!("Successfully found createOSWindow, building config object...");
 
             // 2. Create config object with all parameters
             let mut config = Object::new(env)?;
@@ -94,24 +94,24 @@ pub fn create_os_window(params: WindowCreateParams) -> napi_ohos::Result<i64> {
                 config.set("backgroundColor", color)?;
             }
 
-            log::info!("Calling ArkTS with config object...");
+            crate::info!("Calling ArkTS with config object...");
 
             // 3. Call ArkTS and return the ID on success
             match func.call(config) {
                 Ok(_) => {
-                    log::info!("ArkTS call succeeded, returning ID: {}", id);
+                    crate::info!("ArkTS call succeeded, returning ID: {}", id);
                     return Ok(id);
                 }
                 Err(e) => {
-                    log::error!("ArkTS call failed: {:?}", e);
+                    crate::error!("ArkTS call failed: {:?}", e);
                     return Err(e);
                 }
             }
         } else {
-            log::error!("Main thread env not available");
+            crate::error!("Main thread env not available");
         }
     } else {
-        log::error!("Helper object not initialized");
+        crate::error!("Helper object not initialized");
     }
     Err(Error::from_reason("Helper or Env not initialized"))
 }
@@ -127,7 +127,7 @@ pub fn set_window_decorations(window_id: i64, decorations: bool) -> napi_ohos::R
     if let Some(h) = ret.borrow().as_ref() {
         if let Some(env) = get_main_thread_env().borrow().as_ref() {
             let obj = h.get_value(env).map_err(|e| {
-                log::error!("Failed to get helper object value: {:?}", e);
+                crate::error!("Failed to get helper object value: {:?}", e);
                 e
             })?;
 
@@ -135,10 +135,10 @@ pub fn set_window_decorations(window_id: i64, decorations: bool) -> napi_ohos::R
             func.call((window_id, decorations))?;
             return Ok(());
         } else {
-            log::error!("Main thread env not available");
+            crate::error!("Main thread env not available");
         }
     } else {
-        log::error!("Helper object not initialized");
+        crate::error!("Helper object not initialized");
     }
     Err(Error::from_reason("Helper or Env not initialized"))
 }
@@ -156,7 +156,7 @@ pub fn set_window_background_color(window_id: i64, color: u32) -> napi_ohos::Res
     if let Some(h) = ret.borrow().as_ref() {
         if let Some(env) = get_main_thread_env().borrow().as_ref() {
             let obj = h.get_value(env).map_err(|e| {
-                log::error!("Failed to get helper object value: {:?}", e);
+                crate::error!("Failed to get helper object value: {:?}", e);
                 e
             })?;
 
@@ -164,10 +164,10 @@ pub fn set_window_background_color(window_id: i64, color: u32) -> napi_ohos::Res
             func.call((window_id, color))?;
             return Ok(());
         } else {
-            log::error!("Main thread env not available");
+            crate::error!("Main thread env not available");
         }
     } else {
-        log::error!("Helper object not initialized");
+        crate::error!("Helper object not initialized");
     }
     Err(Error::from_reason("Helper or Env not initialized"))
 }

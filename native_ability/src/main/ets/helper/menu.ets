@@ -3,8 +3,10 @@ import web_webview from '@ohos.web.webview';
 import window from '@ohos.window';
 import display from '@ohos.display';
 import { pasteboard } from '@kit.BasicServicesKit';
+import { hilog } from '@kit.PerformanceAnalysisKit';
 import { WindowManager } from '../window/WindowManager';
 import { getMenuDataCallback, windowKeyForId } from '../components/MenuBarComponent';
+import { DOMAIN } from './constants';
 
 // Global executor singleton — shared by Menu and Tray execution paths
 let globalExecutor: PredefinedActionExecutor | null = null;
@@ -64,7 +66,7 @@ export class PredefinedActionExecutor {
     const doMinimize = () => {
       if (!consumed) {
         consumed = true;
-        try { win.off('windowEvent', onWindowEvent); } catch (_) {}
+        try { win.off('windowEvent', onWindowEvent); } catch (e) { hilog.warn(DOMAIN, 'Menu', 'win.off failed: %{public}s', String(e)); }
         win.minimize();
       }
     };
@@ -76,7 +78,8 @@ export class PredefinedActionExecutor {
     };
     try {
       win.on('windowEvent', onWindowEvent);
-    } catch (_) {
+    } catch (e) {
+      hilog.warn(DOMAIN, 'Menu', 'windowEvent not supported, falling back: %{public}s', String(e));
       // windowEvent not supported — fall back to direct minimize
       win.minimize();
       return;
@@ -92,8 +95,8 @@ export class PredefinedActionExecutor {
       try {
         const wm = WindowManager.getInstance();
         win = wm.getWindow(targetWindowId) ?? this.win;
-      } catch (_) {
-        // fallback to main window
+      } catch (e) {
+        hilog.warn(DOMAIN, 'Menu', 'Window lookup failed, using main window: %{public}s', String(e));
       }
     }
 
@@ -111,7 +114,9 @@ export class PredefinedActionExecutor {
               await sysPasteboard.setData(pasteData);
             }
           }
-        } catch (_) {}
+        } catch (e) {
+          hilog.warn(DOMAIN, 'Menu', 'Clipboard copy failed: %{public}s', String(e));
+        }
         break;
       }
       case 'cut': {
@@ -126,7 +131,9 @@ export class PredefinedActionExecutor {
               await this.controller?.runJavaScript('document.execCommand("delete")');
             }
           }
-        } catch (_) {}
+        } catch (e) {
+          hilog.warn(DOMAIN, 'Menu', 'Clipboard cut failed: %{public}s', String(e));
+        }
         break;
       }
       case 'paste': {
@@ -135,12 +142,15 @@ export class PredefinedActionExecutor {
           const pasteData = await sysPasteboard.getData();
           const text = pasteData.getPrimaryText();
           if (text) {
-            const escaped = text.replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/\n/g, '\\n');
+            // Use JSON.stringify for safe JS string escaping (prevents JS injection)
+            const safeText = JSON.stringify(text);
             await this.controller?.runJavaScript(
-              `document.execCommand("insertText", false, '${escaped}')`
+              `document.execCommand("insertText", false, ${safeText})`
             );
           }
-        } catch (_) {}
+        } catch (e) {
+          hilog.warn(DOMAIN, 'Menu', 'Clipboard paste failed: %{public}s', String(e));
+        }
         break;
       }
       case 'selectAll':

@@ -1,4 +1,4 @@
-::windows下只运行这个脚本就行了
+::Just run this script on Windows
 set SCRIPT_DIR=%~dp0
 
 rmdir /s /q "%SCRIPT_DIR%package\src\main\ets" 2>nul
