@@ -80,7 +80,7 @@ pub fn create_os_window(params: WindowCreateParams) -> napi_ohos::Result<i64> {
             // 2. Create config object with all parameters
             let mut config = Object::new(env)?;
             config.set("name", params.name)?;
-            config.set("type", params.window_type)?;
+            // Note: "type" field is deprecated and no longer sent (OHOS createSubWindow only uses name)
             config.set("windowId", id)?;
             config.set("width", params.width)?;
             config.set("height", params.height)?;

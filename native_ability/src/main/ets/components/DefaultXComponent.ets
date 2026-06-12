@@ -28,7 +28,7 @@ import {
   emitter,
   BusinessError,
 } from "../helper/StatusBarUtils";
-import { DOMAIN } from '../helper/constants';
+import { DOMAIN, NATIVE_MODULE_STORAGE_KEY } from '../helper/constants';
 
 export const RouteName = "NativeAbility";
 
@@ -127,6 +127,12 @@ export struct DefaultXComponent {
         hilog.info(DOMAIN, 'DefaultXComponent', 'Loading native module: %{public}s', moduleName);
         this.nativeModule = await Loadable.load(moduleName, this.loadMode);
         hilog.info(DOMAIN, 'DefaultXComponent', 'Native module loaded, calling render()');
+
+        // Store NAPI module reference in AppStorage so ArkHelper can access
+        // notifyWindowClose() for proper sub-window close lifecycle.
+        // All windows share the same native module loaded from the .so,
+        // so multiple XComponent creations just overwrite with the same reference.
+        AppStorage.setOrCreate<ESObject>(NATIVE_MODULE_STORAGE_KEY, this.nativeModule);
 
         this.nativeModule.render(this.helper, this.rootSlot);
         hilog.info(DOMAIN, 'DefaultXComponent', 'render() completed');

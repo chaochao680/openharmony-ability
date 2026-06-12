@@ -42,6 +42,10 @@ export interface OnDownloadStartResult {
   tempPath?: string;
 }
 
+export interface OnWindowNewResult {
+  allow: boolean;
+}
+
 export interface WebViewInitData {
   url?: string;
   id?: string;
@@ -62,6 +66,8 @@ export interface WebViewInitData {
   onTitleChange?: (title: string) => void;
   onPageBegin?: (url: string) => void;
   onPageEnd?: (url: string) => void;
+  onCloseWindow?: () => void;
+  onWindowNew?: (targetUrl: string, isAlert: boolean, isUserTrigger: boolean) => OnWindowNewResult;
 }
 
 export interface WebViewStyle {
@@ -94,6 +100,7 @@ export interface StatusBarIconRgba {
 
 export interface WindowConfig {
   name: string;
+  /** @deprecated Unused — OHOS createSubWindow only accepts name. Retained for NAPI compat. */
   type: number;
   windowId: number;
   width?: number;

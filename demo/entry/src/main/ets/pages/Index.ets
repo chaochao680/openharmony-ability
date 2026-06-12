@@ -86,6 +86,12 @@ struct Index {
           .onClick(() => {
             router.pushUrl({ url: 'pages/TransparencyTest' });
           })
+        Button("🪟 Window Transparent Test")
+          .fontSize(12)
+          .backgroundColor('#0066FF')
+          .onClick(() => {
+            router.pushUrl({ url: 'pages/WindowTransparentTest' });
+          })
       }.width("100%")
 
       Row({ space: 12 }) {

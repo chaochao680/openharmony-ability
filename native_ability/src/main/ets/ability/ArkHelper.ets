@@ -33,7 +33,7 @@ import {
 } from "../helper/StatusBarUtils";
 import { ConfigurationConstant } from '@kit.AbilityKit';
 import { primaryWebviewControllerCallback, clearPrimaryWebviewControllerCallback } from "../components/DefaultXComponent";
-import { DOMAIN } from '../helper/constants';
+import { DOMAIN, NATIVE_MODULE_STORAGE_KEY } from '../helper/constants';
 
 /**
  * Global ArkHelper factory function.
@@ -213,6 +213,41 @@ export function createArkHelper(): ArkHelper {
           onTitleChange: data?.onTitleChange,
           onPageBegin: data?.onPageBegin,
           onPageEnd: data?.onPageEnd,
+          onWindowNew: data?.onWindowNew,
+          onCloseWindow: () => {
+            try {
+              // Notify Rust event loop to process the close through proper lifecycle:
+              // CloseRequested → Destroyed → WindowsStore cleanup.
+              // notifyWindowClose() is synchronous — pushes window ID to Rust queue.
+              // destroyWindow() is async (Promise) — actual destruction happens later.
+              // Rust's drain runs at the top of the next event loop iteration (synchronous),
+              // so it reads stored Rust values before destroyWindow completes.
+              const nativeModule: ESObject = AppStorage.get<ESObject>(NATIVE_MODULE_STORAGE_KEY);
+              if (nativeModule && typeof nativeModule.notifyWindowClose === 'function') {
+                nativeModule.notifyWindowClose(windowId);
+                hilog.info(DOMAIN, 'ArkHelper', 'Window %{public}d close notified via NAPI', windowId);
+              } else {
+                hilog.warn(DOMAIN, 'ArkHelper', 'NAPI notifyWindowClose not available for window %{public}d', windowId);
+              }
+
+              // Destroy OHOS native window and clean up WindowManager.
+              // removeWindow BEFORE destroyWindow so that aboutToDisappear
+              // (which fires during async destruction) sees the window as
+              // already handled and skips the system-close notification.
+              const wm = WindowManager.getInstance();
+              const win = wm.getWindow(windowId);
+              if (win) {
+                wm.removeWindow(windowId);
+                win.destroyWindow().then(() => {
+                  hilog.info(DOMAIN, 'ArkHelper', 'Window %{public}d destroyed and cleaned up', windowId);
+                }).catch((e: Error) => {
+                  hilog.error(DOMAIN, 'ArkHelper', 'Failed to destroy window %{public}d: %{public}s', windowId, JSON.stringify(e));
+                });
+              }
+            } catch (e) {
+              hilog.error(DOMAIN, 'ArkHelper', 'onCloseWindow failed: %{public}s', JSON.stringify(e));
+            }
+          },
         } as WebviewInitData;
 
         hilog.info(DOMAIN, 'ArkHelper',
@@ -322,6 +357,7 @@ export function createArkHelper(): ArkHelper {
           onTitleChange: data?.onTitleChange,
           onPageBegin: data?.onPageBegin,
           onPageEnd: data?.onPageEnd,
+          onWindowNew: data?.onWindowNew,
         } as WebviewInitData;
 
         hilog.info(DOMAIN, 'ArkHelper',
@@ -369,24 +405,23 @@ export function createArkHelper(): ArkHelper {
     createOSWindow: async (config: WindowConfig): Promise<number> => {
       try {
         hilog.info(DOMAIN, 'ArkHelper', 'Received config from Rust: %{public}s', JSON.stringify(config));
-        hilog.info(DOMAIN, 'ArkHelper', 'Parsed -> name: %{public}s, type: %{public}d',
-          config.name, config.type);
+        hilog.info(DOMAIN, 'ArkHelper', 'Parsed -> name: %{public}s, windowId: %{public}d',
+          config.name, config.windowId);
 
         const wm = WindowManager.getInstance();
         hilog.info(DOMAIN, 'ArkHelper', 'WindowManager instance acquired');
 
-        return await wm.createSubWindow(
-          config.name,
-          config.type,
-          config.windowId,
-          config.width,
-          config.height,
-          config.x,
-          config.y,
-          config.decorations,
-          config.transparent,
-          config.backgroundColor
-        );
+        return await wm.createSubWindow({
+          name: config.name,
+          windowId: config.windowId,
+          width: config.width,
+          height: config.height,
+          x: config.x,
+          y: config.y,
+          decorations: config.decorations,
+          transparent: config.transparent,
+          backgroundColor: config.backgroundColor,
+        });
       } catch (err) {
         hilog.error(DOMAIN, 'ArkHelper', 'Failed to create OS window: %{public}s', JSON.stringify(err));
         throw err;

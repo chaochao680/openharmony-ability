@@ -1,6 +1,7 @@
 {
   "src": [
     "pages/Index",
-    "pages/TransparencyTest"
+    "pages/TransparencyTest",
+    "pages/WindowTransparentTest"
   ]
 }

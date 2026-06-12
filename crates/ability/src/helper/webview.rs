@@ -31,8 +31,17 @@ pub struct DownloadStartResult {
     pub temp_path: Option<String>,
 }
 
+/// Result of the `on_window_new` NAPI callback.
+/// ArkTS reads `allow` to decide whether to call `setWebController(ctrl)` or `setWebController(null)`.
+#[napi(object)]
+#[derive(Debug, Clone, Default)]
+pub struct OnWindowNewResult {
+    pub allow: bool,
+}
+
 type OnDownloadStart<'a> = Option<Function<'a, (String, String), DownloadStartResult>>;
 type OnDownloadEnd<'a> = Option<Function<'a, (String, Option<String>, bool), ()>>;
+type OnWindowNew<'a> = Option<Function<'a, (String, bool, bool), OnWindowNewResult>>;
 
 #[napi(object)]
 #[derive(Default)]
@@ -57,6 +66,7 @@ pub struct WebViewInitData<'a> {
     pub on_title_change: Option<Function<'a, String, ()>>,
     pub on_page_begin: Option<Function<'a, String, ()>>,
     pub on_page_end: Option<Function<'a, String, ()>>,
+    pub on_window_new: OnWindowNew<'a>,
 }
 
 #[derive(Clone)]
