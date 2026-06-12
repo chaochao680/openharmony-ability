@@ -3,12 +3,58 @@ import web_webview from "@ohos.web.webview";
 import { ComponentContent, NodeController, BuilderNode, FrameNode } from "@ohos.arkui.node";
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { randomString } from "../helper";
-import { OnDownloadStartResult } from "../ability/type";
+import { OnDownloadStartResult, OnWindowNewResult } from "../ability/type";
 import { getCookies, JsHelper, convertRRGGBBAAtoAARRGGBB } from "./Utils";
 import { WebHeader } from "@kit.ArkUI";
 import { router } from '@kit.ArkUI';
 import { WindowManager } from '../window/WindowManager';
 import { DOMAIN } from '../helper/constants';
+import { openNewWindowDialog } from "./NewWindowDialog";
+
+/**
+ * Shared onWindowNew handler for both WebBuilder and EmbeddedWebBuilder.
+ * Parses event params, calls the NAPI callback, and either opens a dialog or denies.
+ */
+function handleWindowNew(
+  event: { targetUrl?: string; isAlert?: boolean; isUserTrigger?: boolean; handler: { setWebController: (ctrl: web_webview.WebviewController | null) => void } },
+  data: WebviewNodeData,
+  tag: string,
+): void {
+  const targetUrl: string = event.targetUrl ?? '';
+  const isAlert: boolean = event.isAlert ?? false;
+  const isUserTrigger: boolean = event.isUserTrigger ?? false;
+  hilog.debug(DOMAIN, 'DefaultWebview', '%{public}s onWindowNew: targetUrl=%{public}s, isAlert=%{public}s, isUserTrigger=%{public}s',
+    tag, targetUrl, String(isAlert), String(isUserTrigger));
+  try {
+    if (typeof data?.onWindowNew === 'function') {
+      const result: OnWindowNewResult = data.onWindowNew(targetUrl, isAlert, isUserTrigger);
+      if (result.allow) {
+        hilog.debug(DOMAIN, 'DefaultWebview', '%{public}s onWindowNew: ALLOW — opening dialog', tag);
+        const newCtrl = new web_webview.WebviewController();
+        event.handler.setWebController(newCtrl);
+        // Defer dialog to next tick so the callback returns immediately
+        if (data?.uiContext) {
+          const uiCtx = data.uiContext;
+          setTimeout(() => {
+            openNewWindowDialog(uiCtx, newCtrl, targetUrl);
+          }, 0);
+        } else {
+          hilog.warn(DOMAIN, 'DefaultWebview', '%{public}s onWindowNew: no uiContext, cannot open dialog', tag);
+        }
+      } else {
+        hilog.debug(DOMAIN, 'DefaultWebview', '%{public}s onWindowNew: DENY', tag);
+        event.handler.setWebController(null);
+      }
+    } else {
+      hilog.debug(DOMAIN, 'DefaultWebview', '%{public}s onWindowNew: no handler, default DENY', tag);
+      event.handler.setWebController(null);
+    }
+  } catch (e) {
+    hilog.error(DOMAIN, 'DefaultWebview', '%{public}s onWindowNew exception, calling setWebController(null): %{public}s',
+      tag, JSON.stringify(e));
+    event.handler.setWebController(null);
+  }
+}
 
 export interface WebviewStyle {
   x?: number | string;
@@ -23,6 +69,7 @@ export interface WebviewInitData {
   windowId?: number;
   style?: WebviewStyle;
   controller?: WebviewController;
+  uiContext?: UIContext;
   javascriptEnable?: boolean;
   devtools?: boolean;
   autoplay?: boolean;
@@ -38,6 +85,8 @@ export interface WebviewInitData {
   onTitleChange?: (title: string) => void;
   onPageBegin?: (url: string) => void;
   onPageEnd?: (url: string) => void;
+  onCloseWindow?: () => void;
+  onWindowNew?: (targetUrl: string, isAlert: boolean, isUserTrigger: boolean) => OnWindowNewResult;
 }
 
 interface WebviewNodeData extends WebviewInitData {
@@ -132,21 +181,8 @@ function WebBuilder(data: WebviewNodeData) {
       // due to OHOS Web component initialization_script limitations.
       if (url && event.data.isMainFrame() && url.startsWith('http://close-window.invalid')) {
         hilog.info(DOMAIN, 'DefaultWebview', 'Intercepted close-window URL, destroying window %{public}d', data?.windowId ?? -1);
-        if (data?.windowId !== undefined) {
-          try {
-            const wm = WindowManager.getInstance();
-            const entry = wm.getWindow(data.windowId);
-            if (entry) {
-              entry.destroyWindow().then(() => {
-                wm.removeWindow(data.windowId!);
-                hilog.info(DOMAIN, 'DefaultWebview', 'Window %{public}d destroyed and cleaned up via close-window', data.windowId!);
-              }).catch((e: Error) => {
-                hilog.error(DOMAIN, 'DefaultWebview', 'Failed to destroy window: %{public}s', JSON.stringify(e));
-              });
-            }
-          } catch (e) {
-            hilog.error(DOMAIN, 'DefaultWebview', 'Failed to destroy window: %{public}s', JSON.stringify(e));
-          }
+        if (typeof data?.onCloseWindow === 'function') {
+          data.onCloseWindow();
         }
         return true; // block navigation
       }
@@ -176,6 +212,11 @@ function WebBuilder(data: WebviewNodeData) {
       if (typeof data?.onPageEnd === "function") {
         data.onPageEnd(e.url);
       }
+    })
+    .multiWindowAccess(true)
+    .allowWindowOpenMethod(true)
+    .onWindowNew((event) => {
+      handleWindowNew(event, data, 'WebBuilder');
     });
 }
 
@@ -276,6 +317,11 @@ function EmbeddedWebBuilder(data: WebviewNodeData) {
         if (typeof data?.onPageEnd === "function") {
           data.onPageEnd(e.url);
         }
+      })
+      .multiWindowAccess(true)
+      .allowWindowOpenMethod(true)
+      .onWindowNew((event) => {
+        handleWindowNew(event, data, 'EmbeddedWebBuilder');
       })
     }
   .width("100%")
@@ -467,6 +513,10 @@ export class RustWebviewNodeController extends NodeController {
   }
 
   addWebview(data: WebviewInitData): AddWebviewMethod {
+    // Pass UIContext for promptAction (e.g., openNewWindowDialog)
+    if (!data.uiContext && this.uiContext) {
+      data.uiContext = this.uiContext;
+    }
     const prepared = ensureWebviewNodeData(data);
     const webTag = prepared.webTag!;
     if (this.rootNode === null) {
@@ -510,6 +560,10 @@ export class EmbeddedWebviewManager {
   }
 
   createWebview(data: WebviewInitData): EmbeddedWebviewHandle {
+    // Pass UIContext for promptAction (e.g., openNewWindowDialog)
+    if (!data.uiContext) {
+      data.uiContext = this.uiContext;
+    }
     const prepared = ensureWebviewNodeData(data);
     const webTag = prepared.webTag!;
 

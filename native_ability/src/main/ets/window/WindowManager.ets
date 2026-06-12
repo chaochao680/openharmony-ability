@@ -13,6 +13,19 @@ interface WindowEntry {
   storage?: LocalStorage;
 }
 
+// Encapsulates all parameters for sub-window creation, replacing a 10-arg signature.
+export interface SubWindowOptions {
+  name: string;
+  windowId: number;
+  width?: number;
+  height?: number;
+  x?: number;
+  y?: number;
+  decorations?: boolean;
+  transparent?: boolean;
+  backgroundColor?: number;
+}
+
 export class WindowManager {
   private static instance: WindowManager | null = null;
   private context: common.UIAbilityContext;
@@ -54,8 +67,10 @@ export class WindowManager {
     hilog.info(DOMAIN, 'WindowManager', 'WindowStage set');
   }
 
-  async createSubWindow(name: string, type: number, windowId: number, width: number = 800, height: number = 600, x: number = 100, y: number = 100,
-      decorations: boolean = true, transparent: boolean = false, backgroundColor?: number): Promise<number> {
+  async createSubWindow(opts: SubWindowOptions): Promise<number> {
+    const { name, windowId, width = 800, height = 600, x = 100, y = 100,
+            decorations = true, transparent = false, backgroundColor } = opts;
+
     // Validate windowId: sub-window ID must be greater than 0
     if (windowId <= 0) {
       hilog.error(DOMAIN, 'WindowManager', `Invalid windowId: %{public}d. Sub-window creation requires windowId > 0.`, windowId);

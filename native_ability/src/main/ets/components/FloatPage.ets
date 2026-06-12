@@ -11,7 +11,7 @@ import { hilog } from '@kit.PerformanceAnalysisKit';
 import { window as arkWindow, CursorController } from '@kit.ArkUI';
 import { display } from '@kit.ArkUI';
 import { WindowManager } from '../window/WindowManager';
-import { DOMAIN } from '../helper/constants';
+import { DOMAIN, NATIVE_MODULE_STORAGE_KEY } from '../helper/constants';
 
 export const RouteName = "FloatWindow";
 
@@ -40,6 +40,35 @@ struct FloatPage {
   private startHeight: number = 0;
   private currentWidth: number = 800;
   private currentHeight: number = 600;
+
+  // Prevent double NAPI notification when window is closed via multiple paths
+  private closeNotified: boolean = false;
+
+  aboutToDisappear(): void {
+    // When the OHOS system close button destroys the sub-window,
+    // neither the FloatPage × onClick nor the webview onCloseWindow fires.
+    // aboutToDisappear is our last chance to notify Rust.
+    if (this.closeNotified) {
+      return;
+    }
+    const wm = WindowManager.getInstance();
+    if (!wm.getWindow(this.windowId)) {
+      // Window already removed by our own close paths — skip
+      return;
+    }
+    hilog.info(DOMAIN, 'FloatPage', 'aboutToDisappear: system close detected for window %{public}d', this.windowId);
+    this.closeNotified = true;
+    try {
+      const nativeModule: ESObject = AppStorage.get<ESObject>(NATIVE_MODULE_STORAGE_KEY);
+      if (nativeModule && typeof nativeModule.notifyWindowClose === 'function') {
+        nativeModule.notifyWindowClose(this.windowId);
+        hilog.info(DOMAIN, 'FloatPage', 'Window %{public}d close notified via NAPI (system close)', this.windowId);
+      }
+      wm.removeWindow(this.windowId);
+    } catch (e) {
+      hilog.error(DOMAIN, 'FloatPage', 'aboutToDisappear cleanup failed for window %{public}d: %{public}s', this.windowId, JSON.stringify(e));
+    }
+  }
 
   moveAndSetWindow() {
     this.windowClass?.moveWindowTo(this.windowPosition.x, this.windowPosition.y);
@@ -92,16 +121,6 @@ struct FloatPage {
     }
   }
 
-  aboutToDisappear(): void {
-    hilog.info(DOMAIN, 'FloatPage', 'aboutToDisappear for windowId: %{public}d', this.windowId);
-    // Safety net: ensure WindowManager resources are cleaned up even if the close button's destroyWindow path was not triggered
-    try {
-      WindowManager.getInstance().removeWindow(this.windowId);
-    } catch (e) {
-      hilog.warn(DOMAIN, 'FloatPage', 'aboutToDisappear removeWindow failed: %{public}s', String(e));
-    }
-  }
-
   build() {
     Stack() {
       Column() {
@@ -119,35 +138,56 @@ struct FloatPage {
             .width('100%')
             .height('100%');
 
-          // 2. Top drag control area + right close button (only when decorations are enabled)
-          if (this.windowClass && this.decorations) {
+          // 2. Top drag control area + right close button
+          //    - decorations=true: drag bar + close button (all platforms)
+          //    - decorations=false on desktop: transparent drag bar only (no close button)
+          if (this.windowClass && (this.decorations || this.isDesktop)) {
             Row() {
               Row() {}
                 .layoutWeight(1)
                 .height(40);
 
-              Button() {
-                Image($r('sys.media.ohos_ic_public_cancel'))
-                  .width(20)
-                  .height(20)
-                  .fillColor('#666666');
-              }
-              .width(32)
-              .height(32)
-              .borderRadius(16)
-              .backgroundColor('#f0f0f0')
-              .margin({ top: 4, right: 8 })
-              .onClick(async () => {
-                hilog.info(DOMAIN, 'FloatPage', 'Close button clicked for window %{public}d', this.windowId);
-                try {
-                  if (this.windowClass) {
-                    await this.windowClass.destroyWindow();
-                    WindowManager.getInstance().removeWindow(this.windowId);
-                  }
-                } catch (e) {
-                  hilog.error(DOMAIN, 'FloatPage', 'Failed to destroy window %{public}d: %{public}s', this.windowId, JSON.stringify(e));
+              if (this.decorations) {
+                Button() {
+                  Image($r('sys.media.ohos_ic_public_cancel'))
+                    .width(20)
+                    .height(20)
+                    .fillColor('#666666');
                 }
-              });
+                .width(32)
+                .height(32)
+                .borderRadius(16)
+                .backgroundColor('#f0f0f0')
+                .margin({ top: 4, right: 8 })
+                .onClick(async () => {
+                  hilog.info(DOMAIN, 'FloatPage', 'Close button clicked for window %{public}d', this.windowId);
+                  if (this.closeNotified) {
+                    return;
+                  }
+                  this.closeNotified = true;
+                  try {
+                    // Notify Rust event loop before destroying the OHOS window,
+                    // so CloseRequested → Destroyed → WindowsStore cleanup can run.
+                    const nativeModule: ESObject = AppStorage.get<ESObject>(NATIVE_MODULE_STORAGE_KEY);
+                    if (nativeModule && typeof nativeModule.notifyWindowClose === 'function') {
+                      nativeModule.notifyWindowClose(this.windowId);
+                      hilog.info(DOMAIN, 'FloatPage', 'Window %{public}d close notified via NAPI', this.windowId);
+                    } else {
+                      hilog.warn(DOMAIN, 'FloatPage', 'NAPI notifyWindowClose not available for window %{public}d', this.windowId);
+                    }
+
+                    // removeWindow BEFORE destroyWindow so that aboutToDisappear
+                    // sees the window as already handled (consistent with ArkHelper.onCloseWindow)
+                    WindowManager.getInstance().removeWindow(this.windowId);
+                    if (this.windowClass) {
+                      await this.windowClass.destroyWindow();
+                      hilog.info(DOMAIN, 'FloatPage', 'Window %{public}d destroyed and cleaned up', this.windowId);
+                    }
+                  } catch (e) {
+                    hilog.error(DOMAIN, 'FloatPage', 'Failed to close window %{public}d: %{public}s', this.windowId, JSON.stringify(e));
+                  }
+                });
+              }
             }
             .width('100%')
             .height(40)
@@ -172,8 +212,8 @@ struct FloatPage {
       .height('100%')
       .backgroundColor(Color.Transparent);
 
-      // 3. Resize handles (only on desktop with decorations enabled)
-      if (this.isDesktop && this.windowClass && this.decorations) {
+      // 3. Resize handles (on desktop, always available regardless of decorations)
+      if (this.isDesktop && this.windowClass) {
         // Right edge resize handle
         Row() {}
           .width(10)

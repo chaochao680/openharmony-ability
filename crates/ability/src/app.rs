@@ -704,6 +704,45 @@ pub fn is_desktop_device() -> bool {
     cfg!(desktop)
 }
 
+/// Global queue for pending window close requests from ArkTS.
+/// When ArkTS intercepts a close-window URL, it pushes the OHOS window ID here
+/// instead of directly destroying the window. The tauri-runtime-wry event loop
+/// drains this queue and processes closes through the proper Rust lifecycle
+/// (CloseRequested → Destroyed → WindowsStore cleanup).
+#[cfg(target_env = "ohos")]
+static PENDING_WINDOW_CLOSES: Mutex<Vec<i32>> = Mutex::new(Vec::new());
+
+/// NAPI function called from ArkTS to request a window close.
+/// This queues the OHOS window ID for processing by the Rust event loop,
+/// ensuring proper lifecycle events (CloseRequested, Destroyed) are emitted.
+///
+/// Timing: ArkTS calls this synchronously before `destroyWindow()` (async).
+/// The Rust event loop drains the queue at the start of the next iteration,
+/// processing window IDs before the async OHOS destruction completes.
+/// The Rust side only uses the ID to look up the Tauri window in WindowsStore —
+/// it never accesses the OHOS window object directly, so destroyed windows are safe.
+#[napi]
+#[cfg(target_env = "ohos")]
+pub fn notify_window_close(window_id: i32) {
+    match PENDING_WINDOW_CLOSES.lock() {
+        Ok(mut queue) => queue.push(window_id),
+        Err(poisoned) => {
+            log::warn!("[OHOS] PENDING_WINDOW_CLOSES mutex poisoned, recovering. window_id={}", window_id);
+            poisoned.into_inner().push(window_id);
+        }
+    }
+}
+
+/// Drain all pending window close requests.
+/// Called by tauri-runtime-wry event loop to process queued closes.
+#[cfg(target_env = "ohos")]
+pub fn drain_pending_window_closes() -> Vec<i32> {
+    PENDING_WINDOW_CLOSES
+        .lock()
+        .map(|mut q| q.drain(..).collect())
+        .unwrap_or_default()
+}
+
 #[derive(Clone)]
 pub struct SaveSaver<'a> {
     pub(crate) app: &'a OpenHarmonyApp,

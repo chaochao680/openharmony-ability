@@ -6,12 +6,13 @@ use napi_ohos::{
     Error, Result,
 };
 
-use crate::helper::{DownloadStartResult, WebViewInitData, WebViewStyle, Webview};
+use crate::helper::{DownloadStartResult, OnWindowNewResult, WebViewInitData, WebViewStyle, Webview};
 
 mod drag;
 
 type OnDownloadStart = Box<dyn Fn(String, &mut PathBuf) -> bool>;
 type OnDownloadEnd = Box<dyn Fn(String, Option<PathBuf>, bool)>;
+type OnWindowNew = Box<dyn Fn(String, bool, bool) -> bool>;
 
 #[cfg(feature = "webview")]
 #[derive(Default)]
@@ -37,6 +38,7 @@ pub struct WebViewBuilder {
     on_title_change: Option<Box<dyn Fn(String)>>,
     on_page_begin: Option<Box<dyn Fn(String)>>,
     on_page_end: Option<Box<dyn Fn(String)>>,
+    on_window_new: Option<OnWindowNew>,
 }
 
 impl WebViewBuilder {
@@ -229,6 +231,31 @@ impl WebViewBuilder {
         }
     }
 
+    /// Register a handler for new window requests.
+    /// The handler receives `(target_url, is_alert, is_user_trigger)` and returns `bool`
+    /// (`true` = allow, `false` = deny).
+    ///
+    /// # Safety note
+    /// Uses `transmute` to erase the lifetime bound. This is safe because the builder
+    /// is consumed (via `build()`) before the closure's captured references go out of scope.
+    pub fn on_window_new<F: Fn(String, bool, bool) -> bool>(
+        self,
+        on_window_new: F,
+    ) -> WebViewBuilder {
+        // SAFETY: The builder is consumed before captured references expire.
+        // Same pattern as on_navigation_request, on_page_begin, etc.
+        let static_handler = unsafe {
+            std::mem::transmute::<
+                Box<dyn Fn(String, bool, bool) -> bool>,
+                Box<dyn Fn(String, bool, bool) -> bool + 'static>,
+            >(Box::new(on_window_new))
+        };
+        WebViewBuilder {
+            on_window_new: Some(static_handler),
+            ..self
+        }
+    }
+
     pub fn build(self) -> Result<Webview> {
         let id = self
             .id
@@ -363,6 +390,34 @@ impl WebViewBuilder {
                     .ok()
                 });
 
+                let on_window_new = self.on_window_new.and_then(|handler| {
+                    match env.create_function_from_closure("on_window_new", move |ctx| {
+                        let target_url = ctx.try_get::<String>(0)?;
+                        let is_alert = ctx.try_get::<bool>(1)?;
+                        let is_user_trigger = ctx.try_get::<bool>(2)?;
+                        let target_url_str = match target_url {
+                            Either::A(s) => s,
+                            Either::B(_) => String::new(),
+                        };
+                        let is_alert_bool = match is_alert {
+                            Either::A(b) => b,
+                            Either::B(_) => false,
+                        };
+                        let is_user_trigger_bool = match is_user_trigger {
+                            Either::A(b) => b,
+                            Either::B(_) => false,
+                        };
+                        let allow = handler(target_url_str, is_alert_bool, is_user_trigger_bool);
+                        Ok(OnWindowNewResult { allow })
+                    }) {
+                        Ok(func) => Some(func),
+                        Err(e) => {
+                            log::error!("[WebViewBuilder] on_window_new NAPI registration failed: {}", e);
+                            None
+                        }
+                    }
+                });
+
                 let webview = create_webview_func.call(WebViewInitData {
                     url: self.url,
                     id: Some(id.clone()),
@@ -387,6 +442,7 @@ impl WebViewBuilder {
                     on_title_change,
                     on_page_begin,
                     on_page_end,
+                    on_window_new,
                 })?;
 
                 let web = Webview::new(id.clone(), webview)?;
