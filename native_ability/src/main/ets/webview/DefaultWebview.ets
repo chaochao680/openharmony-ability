@@ -4,12 +4,13 @@ import { ComponentContent, NodeController, BuilderNode, FrameNode } from "@ohos.
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { randomString } from "../helper";
 import { OnDownloadStartResult, OnWindowNewResult } from "../ability/type";
-import { getCookies, JsHelper, convertRRGGBBAAtoAARRGGBB } from "./Utils";
+import { getCookies, JsHelper, convertRRGGBBAAtoAARRGGBB, SnapshotData } from "./Utils";
 import { WebHeader } from "@kit.ArkUI";
 import { router } from '@kit.ArkUI';
 import { WindowManager } from '../window/WindowManager';
 import { DOMAIN } from '../helper/constants';
 import { openNewWindowDialog } from "./NewWindowDialog";
+import { BusinessError } from '@kit.BasicServicesKit';
 
 /**
  * Shared onWindowNew handler for both WebBuilder and EmbeddedWebBuilder.
@@ -463,6 +464,81 @@ function buildJsHelper(controller: WebviewController): JsHelper {
     });
   };
 
+  const webPageSnapshot = (): Promise<SnapshotData> => {
+    return new Promise<SnapshotData>((resolve, reject) => {
+      // Overall timeout: reject if not completed within 10s
+      let settled = false;
+      const timeoutId = setTimeout(() => {
+        if (!settled) {
+          settled = true;
+          reject(new Error('webPageSnapshot timed out after 10s'));
+        }
+      }, 10000);
+
+      const done = (fn: () => void) => {
+        if (!settled) {
+          settled = true;
+          clearTimeout(timeoutId);
+          fn();
+        }
+      };
+
+      const attempt = (retriesLeft: number) => {
+        if (settled) return;
+        try {
+          controller.webPageSnapshot({ id: "snapshot" }, (error: BusinessError, result: web_webview.SnapshotResult) => {
+            if (error) {
+              if (retriesLeft > 0) {
+                hilog.warn(DOMAIN, 'DefaultWebview', 'webPageSnapshot attempt failed (%{public}s), retrying (%{public}d left)...', error.message, retriesLeft);
+                setTimeout(() => attempt(retriesLeft - 1), 500);
+              } else {
+                hilog.error(DOMAIN, 'DefaultWebview', 'webPageSnapshot error: %{public}s', JSON.stringify(error));
+                done(() => reject(new Error(`webPageSnapshot failed: ${error.code} - ${error.message}`)));
+              }
+              return;
+            }
+            if (!result || result.status !== true || !result.imagePixelMap) {
+              done(() => reject(new Error('webPageSnapshot returned empty or failed result')));
+              return;
+            }
+            const pixelMap = result.imagePixelMap;
+            try {
+              const info = pixelMap.getImageInfoSync();
+              const byteCount = pixelMap.getPixelBytesNumber();
+              const buffer = new ArrayBuffer(byteCount);
+              pixelMap.readPixelsToBufferSync(buffer);
+              const rgba = new Uint8Array(buffer);
+              done(() => resolve({
+                rgba: rgba,
+                width: info.size.width,
+                height: info.size.height,
+              }));
+            } catch (e) {
+              hilog.error(DOMAIN, 'DefaultWebview', 'webPageSnapshot PixelMap conversion error: %{public}s', String(e));
+              done(() => reject(new Error(`PixelMap conversion failed: ${String(e)}`)));
+            } finally {
+              try {
+                pixelMap.release();
+              } catch (releaseErr) {
+                hilog.warn(DOMAIN, 'DefaultWebview', 'webPageSnapshot PixelMap release warning: %{public}s', String(releaseErr));
+              }
+            }
+          });
+        } catch (e) {
+          if (retriesLeft > 0) {
+            hilog.warn(DOMAIN, 'DefaultWebview', 'webPageSnapshot exception (%{public}s), retrying (%{public}d left)...', String(e), retriesLeft);
+            setTimeout(() => attempt(retriesLeft - 1), 500);
+          } else {
+            hilog.error(DOMAIN, 'DefaultWebview', 'webPageSnapshot exception: %{public}s', String(e));
+            done(() => reject(new Error(`webPageSnapshot exception: ${String(e)}`)));
+          }
+        }
+      };
+      // Initial delay + up to 3 retries with 500ms intervals
+      setTimeout(() => attempt(3), 500);
+    });
+  };
+
   return {
     getUrl,
     getCookies: getCookiesHelper,
@@ -473,6 +549,7 @@ function buildJsHelper(controller: WebviewController): JsHelper {
     requestFocus,
     clearAllBrowsingData,
     runJavaScript,
+    webPageSnapshot,
     setBackgroundColor: (_color: number) => {},
     setVisible: (_visible: boolean) => {},
     dispose: () => {},
