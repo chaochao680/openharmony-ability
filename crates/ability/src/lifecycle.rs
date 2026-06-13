@@ -29,7 +29,7 @@ pub struct WindowStageEventCallback<'a> {
     pub on_window_size_change: Function<'a, Object<'a>, ()>,
     pub on_window_rect_change: Function<'a, Object<'a>, ()>,
     pub on_avoid_area_change: Function<'a, Object<'a>, ()>,
-    pub on_new_want: Function<'a, String, ()>,
+    pub on_new_want: Function<'a, Object<'a>, ()>,
 }
 
 #[napi(object)]
@@ -289,7 +289,10 @@ pub fn create_lifecycle_handle<'a>(
     let on_new_want_app = app.clone();
     let on_new_want =
         env.create_function_from_closure("on_new_want", move |ctx| {
-            let uri = ctx.first_arg::<String>()?;
+            let data = ctx.first_arg::<Object>()?;
+            let uri = data.get_named_property::<String>("uri")?;
+            let parameters_json = data.get_named_property::<String>("parametersJson")?;
+            crate::app::store_want_parameters(&parameters_json);
             if let Some(ref mut h) = *on_new_want_app.event_loop.borrow_mut() {
                 h(Event::NewWant { uri })
             }
