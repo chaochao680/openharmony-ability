@@ -314,8 +314,9 @@ export class NativeAbility extends UIAbility {
 
   onNewWant(want: Want, launchParam: AbilityConstant.LaunchParam): void {
     const uri = want.uri ?? '';
-    hilog.info(DOMAIN, 'NativeAbility', 'onNewWant - uri: %{public}s', uri);
-    this.forEachLifecycle((lifecycle) => lifecycle.windowStageEventCallback.onNewWant(uri));
+    const parametersJson = JSON.stringify(want.parameters ?? {});
+    hilog.info(DOMAIN, 'NativeAbility', 'onNewWant - uri: %{public}s, parametersJson.length: %{public}d', uri, parametersJson.length);
+    this.forEachLifecycle((lifecycle) => lifecycle.windowStageEventCallback.onNewWant({ uri, parametersJson }));
   }
 
   onConfigurationUpdate(newConfig: Configuration): void {

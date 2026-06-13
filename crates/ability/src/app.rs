@@ -764,3 +764,64 @@ impl<'a> SaveLoader<'a> {
         self.app.load()
     }
 }
+
+// --- want.parameters storage for single-instance plugin ---
+
+#[cfg(target_env = "ohos")]
+static WANT_PARAMETERS: Mutex<String> = Mutex::new(String::new());
+
+#[cfg(target_env = "ohos")]
+pub(crate) fn store_want_parameters(json: &str) {
+    match WANT_PARAMETERS.lock() {
+        Ok(mut params) => *params = json.to_string(),
+        Err(e) => crate::error!("WANT_PARAMETERS mutex poisoned in store: {}", e),
+    }
+}
+
+/// Returns the latest `want.parameters` JSON string from `onNewWant`, then clears it.
+///
+/// Returns an empty string if no parameters are pending or if the mutex is poisoned.
+///
+/// # Concurrency
+/// - `store` is called from the ArkTS main thread (via NAPI `on_new_want` closure)
+/// - `take` is called from the tauri event loop thread (via `RunEvent::Opened` handler)
+/// - Cross-thread safety is ensured by `Mutex<String>`
+/// - If `store` is called twice before `take`, the first value is overwritten
+#[cfg(target_env = "ohos")]
+pub fn take_want_parameters() -> String {
+    match WANT_PARAMETERS.lock() {
+        Ok(mut p) => std::mem::take(&mut *p),
+        Err(e) => {
+            crate::error!("WANT_PARAMETERS mutex poisoned in take: {}", e);
+            String::new()
+        }
+    }
+}
+
+/// Tests for WANT_PARAMETERS global static.
+/// Combined into a single #[test] to avoid parallel execution races on the shared static.
+#[cfg(test)]
+mod want_parameters_tests {
+    use super::*;
+
+    #[test]
+    fn test_want_parameters_store_take_overwrite() {
+        // 1. store and take
+        take_want_parameters(); // ensure clean state
+        store_want_parameters(r#"{"key":"value","num":42}"#);
+        assert_eq!(take_want_parameters(), r#"{"key":"value","num":42}"#);
+
+        // 2. take clears after read
+        store_want_parameters(r#"{"source":"widget"}"#);
+        assert_eq!(take_want_parameters(), r#"{"source":"widget"}"#);
+        assert_eq!(take_want_parameters(), "");
+
+        // 3. take without store returns empty
+        assert_eq!(take_want_parameters(), "");
+
+        // 4. overwrite: last store wins
+        store_want_parameters(r#"{"first":1}"#);
+        store_want_parameters(r#"{"second":2}"#);
+        assert_eq!(take_want_parameters(), r#"{"second":2}"#);
+    }
+}

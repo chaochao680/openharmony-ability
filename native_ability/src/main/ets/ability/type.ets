@@ -19,6 +19,12 @@ export interface KeyboardCallback {
   onKeyboardHeightChange: (height: number) => void;
 }
 
+// Must match napi-generated index.d.ts inline type for onNewWant
+export interface NewWantData {
+  uri: string;
+  parametersJson: string;
+}
+
 export interface WindowStageEventCallback {
   onWindowStageCreate: () => void;
   onWindowStageDestroy: () => void;
@@ -29,7 +35,7 @@ export interface WindowStageEventCallback {
   onWindowSizeChange: (arg: object) => void;
   onWindowRectChange: (arg: object) => void;
   onAvoidAreaChange: (arg: object) => void;
-  onNewWant: (uri: string) => void;
+  onNewWant: (data: NewWantData) => void;
 }
 
 export interface WebViewComponentEventCallback {

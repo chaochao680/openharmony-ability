@@ -36,7 +36,7 @@ export interface WindowStageEventCallback {
   onWindowSizeChange: (arg: object) => void
   onWindowRectChange: (arg: object) => void
   onAvoidAreaChange: (arg: object) => void
-  onNewWant: (arg: string) => void
+  onNewWant: (arg: { uri: string; parametersJson: string }) => void
 }
 
 export declare function isDesktopDevice(): boolean
