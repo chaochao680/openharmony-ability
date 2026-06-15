@@ -8,12 +8,20 @@ use std::{
 use http::{HeaderName, HeaderValue, Request, Response};
 use napi_derive_ohos::napi;
 use napi_ohos::{
-    bindgen_prelude::{FnArgs, Function, JsObjectValue, ObjectRef},
+    bindgen_prelude::{CallbackContext, FnArgs, Function, JsObjectValue, JsValue, Object, ObjectRef, PromiseRaw, Uint8Array, Unknown},
     Either, Error, Result,
 };
 use ohos_web_binding::{ArkWebResponse, CustomProtocolHandler, Web};
 
 use crate::get_main_thread_env;
+
+/// Snapshot result returned by `web_page_snapshot()`.
+/// Contains RGBA pixel data and dimensions.
+pub struct SnapshotData {
+    pub rgba: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+}
 
 #[napi(object)]
 #[derive(Debug, Clone, Default)]
@@ -75,6 +83,12 @@ pub struct Webview {
     inner: Rc<ObjectRef>,
     web_view_native: Rc<Web>,
 }
+
+// Safety: Webview is only ever used on the main thread (created in wry event loop,
+// accessed via WithWebview handler on main thread). Rc<ObjectRef> does not cross
+// thread boundaries in practice. This matches the pattern used by SendableHelper,
+// CustomProtocolResponder, and OpenHarmonyApp in this codebase.
+unsafe impl Send for Webview {}
 
 impl Webview {
     pub fn new(tag: String, inner: ObjectRef) -> Result<Self> {
@@ -301,6 +315,72 @@ impl Webview {
                 .get_value(env)?
                 .get_named_property::<Function<'_, (), ()>>("clearAllBrowsingData")?;
             clear_all_browsing_data_js_function.call(())?;
+            Ok(())
+        } else {
+            Err(Error::from_reason("Failed to get main thread env"))
+        }
+    }
+
+    /// Capture a full-page snapshot of the web content as RGBA bitmap data.
+    ///
+    /// Calls the ArkTS `webPageSnapshot()` method which uses OHOS
+    /// `WebviewController.webPageSnapshot()` API (API 12+).
+    /// The callback fires asynchronously when the snapshot is ready.
+    ///
+    /// # Arguments
+    /// * `callback` - Called with `Ok(SnapshotData)` on success, `Err` on failure.
+    pub fn web_page_snapshot(
+        &self,
+        callback: impl FnOnce(std::result::Result<SnapshotData, String>) + 'static,
+    ) -> Result<()> {
+        if let Some(env) = get_main_thread_env().borrow().as_ref() {
+            let snapshot_fn = self
+                .inner
+                .get_value(env)?
+                .get_named_property::<Function<'_, (), Unknown<'_>>>("webPageSnapshot")?;
+
+            let cb = Rc::new(std::cell::Cell::new(Some(callback)));
+            let cb_catch = cb.clone();
+
+            let result = snapshot_fn.call(())?;
+            let promise: PromiseRaw<'static, Unknown<'static>> = unsafe { result.cast()? };
+            promise
+                .then(move |ctx: CallbackContext<Unknown>| {
+                    let snapshot_data = (|| -> std::result::Result<SnapshotData, String> {
+                        let obj: Object<'_> = unsafe { ctx.value.cast() }
+                            .map_err(|e| format!("Failed to cast to Object: {}", e))?;
+                        let rgba_arr = obj
+                            .get_named_property::<Uint8Array>("rgba")
+                            .map_err(|e| format!("Failed to get rgba: {}", e))?;
+                        let width = obj
+                            .get_named_property::<u32>("width")
+                            .map_err(|e| format!("Failed to get width: {}", e))?;
+                        let height = obj
+                            .get_named_property::<u32>("height")
+                            .map_err(|e| format!("Failed to get height: {}", e))?;
+                        Ok(SnapshotData {
+                            rgba: rgba_arr.to_vec(),
+                            width,
+                            height,
+                        })
+                    })();
+
+                    if let Some(cb) = cb.replace(None) {
+                        cb(snapshot_data);
+                    }
+                    Ok(())
+                })?
+                .catch(move |ctx: CallbackContext<Unknown>| {
+                    let reason = ctx
+                        .value
+                        .coerce_to_string()
+                        .and_then(|s| s.into_utf8().and_then(|u| u.into_owned()))
+                        .unwrap_or_else(|_| "unknown rejection".to_string());
+                    if let Some(cb) = cb_catch.replace(None) {
+                        cb(Err(format!("webPageSnapshot rejected: {}", reason)));
+                    }
+                    Ok(())
+                })?;
             Ok(())
         } else {
             Err(Error::from_reason("Failed to get main thread env"))

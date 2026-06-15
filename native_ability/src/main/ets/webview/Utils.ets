@@ -37,6 +37,12 @@ export interface JsWebviewStyle {
   visible?: boolean;
 }
 
+export interface SnapshotData {
+  rgba: Uint8Array;
+  width: number;
+  height: number;
+}
+
 export interface JsHelper {
   getCookies: (url: string) => string;
   getUrl: () => string;
@@ -50,6 +56,7 @@ export interface JsHelper {
   setVisible: (visible: boolean) => void;
   dispose: () => void;
   clearAllBrowsingData: () => void;
+  webPageSnapshot: () => Promise<SnapshotData>;
 }
 
 /**
@@ -164,5 +171,12 @@ export class ProxyJsHelper implements JsHelper {
     } else {
       this.pendingOperations.push(() => this.realController!.clearAllBrowsingData());
     }
+  }
+
+  webPageSnapshot(): Promise<SnapshotData> {
+    if (this.realController) {
+      return this.realController.webPageSnapshot();
+    }
+    return Promise.reject(new Error('WebviewController not bound yet'));
   }
 }
