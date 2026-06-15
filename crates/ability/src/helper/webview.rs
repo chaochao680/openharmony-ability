@@ -32,6 +32,51 @@ pub struct WebViewStyle {
     pub background_color: Option<u32>,
 }
 
+#[derive(Default, Clone, Debug)]
+pub struct PdfConfig {
+    pub width: Option<f64>,
+    pub height: Option<f64>,
+    pub margin_top: Option<f64>,
+    pub margin_bottom: Option<f64>,
+    pub margin_left: Option<f64>,
+    pub margin_right: Option<f64>,
+    pub scale: Option<f64>,
+    pub should_print_background: Option<bool>,
+}
+
+impl PdfConfig {
+    /// Convert to HashMap for NAPI transport. Only includes fields that are Some.
+    /// Keys use camelCase to match ArkTS PdfConfiguration naming.
+    pub fn to_napi_map(&self) -> HashMap<String, Either<f64, bool>> {
+        let mut map = HashMap::new();
+        if let Some(v) = self.width {
+            map.insert("width".to_string(), Either::A(v));
+        }
+        if let Some(v) = self.height {
+            map.insert("height".to_string(), Either::A(v));
+        }
+        if let Some(v) = self.margin_top {
+            map.insert("marginTop".to_string(), Either::A(v));
+        }
+        if let Some(v) = self.margin_bottom {
+            map.insert("marginBottom".to_string(), Either::A(v));
+        }
+        if let Some(v) = self.margin_left {
+            map.insert("marginLeft".to_string(), Either::A(v));
+        }
+        if let Some(v) = self.margin_right {
+            map.insert("marginRight".to_string(), Either::A(v));
+        }
+        if let Some(v) = self.scale {
+            map.insert("scale".to_string(), Either::A(v));
+        }
+        if let Some(v) = self.should_print_background {
+            map.insert("shouldPrintBackground".to_string(), Either::B(v));
+        }
+        map
+    }
+}
+
 #[napi(object)]
 #[derive(Default)]
 pub struct DownloadStartResult {
@@ -385,6 +430,78 @@ impl Webview {
         } else {
             Err(Error::from_reason("Failed to get main thread env"))
         }
+    }
+
+    /// Generates a PDF of the current web content and writes it to `path`.
+    ///
+    /// IMPORTANT: Must only be called after the page has fully loaded
+    /// (i.e., after onPageEnd fires). Calling earlier produces a blank
+    /// or incomplete PDF.
+    ///
+    /// # Callback contract
+    /// - On success: `callback(true)` is called after the file is written
+    /// - On early errors (invalid env, missing NAPI function): `callback(false)` is called before returning `Err`
+    /// - On catastrophic NAPI failures (closure creation or call fails after callback is moved):
+    ///   the callback is dropped without invocation. This is unrecoverable.
+    pub fn create_pdf(
+        &self,
+        path: &str,
+        config: Option<PdfConfig>,
+        callback: Box<dyn Fn(bool) + Send + 'static>,
+    ) -> Result<()> {
+        let binding = get_main_thread_env();
+        let borrowed = binding.borrow();
+        let env = match borrowed.as_ref() {
+            Some(env) => env,
+            None => {
+                callback(false);
+                return Err(Error::from_reason("Failed to get main thread env"));
+            }
+        };
+
+        let config_map = config.unwrap_or_default().to_napi_map();
+
+        let create_pdf_fn = match self.inner.get_value(env) {
+            Ok(v) => v,
+            Err(e) => {
+                callback(false);
+                return Err(e);
+            }
+        };
+
+        let create_pdf_fn = match create_pdf_fn.get_named_property::<Function<
+            '_,
+            FnArgs<(
+                String,
+                HashMap<String, Either<f64, bool>>,
+                Function<'_, bool, ()>,
+            )>,
+            (),
+        >>("createPdf") {
+            Ok(f) => f,
+            Err(e) => {
+                callback(false);
+                return Err(e);
+            }
+        };
+
+        // callback is moved into the NAPI closure below.
+        // If create_function_from_closure or call() fails after this point,
+        // the callback cannot be invoked — these are catastrophic NAPI failures.
+        let cb = env.create_function_from_closure("create_pdf_callback", move |ctx| {
+            // napi-ohos try_get returns Either<T, JsUnknown>; Either::B covers
+            // the case where the ArkTS callback passes a non-bool (e.g. undefined).
+            let success = ctx.try_get::<bool>(0)?;
+            let success = match success {
+                Either::A(b) => b,
+                Either::B(_) => false,
+            };
+            callback(success);
+            Ok(())
+        })?;
+
+        create_pdf_fn.call((path.to_string(), config_map, cb).into())?;
+        Ok(())
     }
 
     pub fn on_controller_attach<F>(&self, callback: F) -> Result<()>
