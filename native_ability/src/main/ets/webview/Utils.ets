@@ -57,6 +57,7 @@ export interface JsHelper {
   dispose: () => void;
   clearAllBrowsingData: () => void;
   webPageSnapshot: () => Promise<SnapshotData>;
+  createPdf: (path: string, config: Record<string, number | boolean>, callback: (success: boolean) => void) => void;
 }
 
 /**
@@ -178,5 +179,13 @@ export class ProxyJsHelper implements JsHelper {
       return this.realController.webPageSnapshot();
     }
     return Promise.reject(new Error('WebviewController not bound yet'));
+  }
+
+  createPdf(path: string, config: Record<string, number | boolean>, callback: (success: boolean) => void): void {
+    if (this.realController) {
+      this.realController.createPdf(path, config, callback);
+    } else {
+      this.pendingOperations.push(() => this.realController!.createPdf(path, config, callback));
+    }
   }
 }
