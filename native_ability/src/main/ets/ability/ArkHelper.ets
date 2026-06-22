@@ -576,12 +576,27 @@ export function createArkHelper(): ArkHelper {
 
     executePredefinedAction: (actionType: string) => {
       const executor = getPredefinedActionExecutor();
-      if (executor) {
-        // Tray actions always target main window (no targetWindowId → defaults to this.win)
-        executor.execute(actionType as PredefinedType);
-      } else {
+      if (!executor) {
         hilog.warn(DOMAIN, 'ArkHelper',
           'PredefinedActionExecutor not initialized, action: %{public}s', actionType);
+        return;
+      }
+
+      // Window operations from tray menu must be deferred to avoid race condition
+      // with system's onNewWant → GoForeground transition.
+      // These operations are deferred until RESUMED/WINDOW_ACTIVE event fires.
+      const WINDOW_OPERATIONS: PredefinedType[] = ['minimize', 'hide', 'close'];
+      if (WINDOW_OPERATIONS.includes(actionType as PredefinedType)) {
+        hilog.info(DOMAIN, 'ArkHelper',
+          'Deferring window operation "%{public}s" to avoid race with system foreground transition',
+          actionType);
+        const wm = WindowManager.getInstance();
+        wm.setPendingAction(() => {
+          executor.execute(actionType as PredefinedType);
+        });
+      } else {
+        // Non-window operations (quit, showAll, bringAllToFront, etc.) execute immediately
+        executor.execute(actionType as PredefinedType);
       }
     },
 
