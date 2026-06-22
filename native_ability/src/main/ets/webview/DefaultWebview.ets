@@ -699,6 +699,11 @@ export class RustWebviewNodeController extends NodeController {
 
     this.rootNode?.removeChild(node.getFrameNode());
   }
+
+  getPrimaryWebviewController(): web_webview.WebviewController | null {
+    const firstEntry = this.webviewEntries.values().next().value;
+    return (firstEntry as WebviewNodeData)?.controller ?? null;
+  }
 }
 
 export class EmbeddedWebviewManager {

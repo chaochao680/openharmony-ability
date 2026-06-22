@@ -33,15 +33,32 @@ export class WindowManager {
   private windows: Map<number, WindowEntry> = new Map();
   private controllers: Map<number, RustWebviewNodeController> = new Map();
   private uiContexts: Map<number, UIContext> = new Map();
-  
+
+  // Track the last focused window via WINDOW_ACTIVE (kept for backward compat / debugging)
+  private lastFocusedWindow: window.Window | null = null;
+  private lastFocusedWindowId: number = -1;
+
+  // Track the window the user last physically touched (onTouch-based).
+  // Unlike WINDOW_ACTIVE, onTouch only fires on actual user touch — immune to
+  // cascade broadcasts, GoForeground events, and programmatic showWindow().
+  // Semantically equivalent to macOS Key Window / Windows Foreground Window.
+  private lastUserInteractedWindowId: number = -1;
+
+  // Pending window action for StatusBar menu race condition fix
+  // When a tray menu item is clicked, the system triggers onNewWant → GoForeground
+  // which can undo our window operations (minimize/hide/close).
+  // Solution: defer window operations until WINDOW_ACTIVE/WINDOW_SHOWN event fires.
+  private pendingAction: (() => void) | null = null;
+  private cleanupTimer: number | null = null;
+
   // Proxy object queue (caches Rust operations before Controller is ready)
   private pendingJsHelperProxies: Map<number, ProxyJsHelper> = new Map();
-  
+
   // Pending URL queue
   private pendingUrls: Map<number, string> = new Map();
   // Pending WebView init queue (resolves race conditions)
   private pendingInits: Map<number, WebviewInitData> = new Map();
-  
+
   private constructor(context: common.UIAbilityContext) {
     this.context = context;
   }
@@ -65,6 +82,223 @@ export class WindowManager {
   setWindowStage(windowStage: window.WindowStage): void {
     this.windowStage = windowStage;
     hilog.info(DOMAIN, 'WindowManager', 'WindowStage set');
+
+    // Register main window (id=0) for focus tracking
+    try {
+      const mainWindow = windowStage.getMainWindowSync();
+      this.registerFocusTracking(mainWindow, 0);
+      hilog.info(DOMAIN, 'WindowManager', 'Main window focus tracking registered');
+    } catch (e) {
+      hilog.warn(DOMAIN, 'WindowManager', 'Failed to register main window focus tracking: %{public}s', String(e));
+    }
+  }
+
+  // Register WINDOW_ACTIVE listener for focus tracking
+  // Also listens for RESUMED/WINDOW_ACTIVE to consume pending actions
+  private registerFocusTracking(win: window.Window, windowId: number): void {
+    win.on('windowEvent', (eventType: window.WindowEventType) => {
+      // Track last focused window
+      if (eventType === window.WindowEventType.WINDOW_ACTIVE) {
+        this.lastFocusedWindow = win;
+        this.lastFocusedWindowId = windowId;
+        hilog.info(DOMAIN, 'WindowManager', 'Last focused window updated: id=%{public}d', windowId);
+      }
+
+      // Consume pending action when system foreground transition completes
+      // WINDOW_ACTIVE: window gained focus (marks end of foreground transition)
+      // WINDOW_SHOWN: window is visible (alternative trigger)
+      if (eventType === window.WindowEventType.WINDOW_ACTIVE ||
+          eventType === window.WindowEventType.WINDOW_SHOWN) {
+        if (this.hasPendingAction()) {
+          hilog.info(DOMAIN, 'WindowManager',
+            'System foreground transition complete (event: %{public}s), executing pending action',
+            eventType === window.WindowEventType.WINDOW_ACTIVE ? 'WINDOW_ACTIVE' : 'WINDOW_SHOWN');
+          this.consumePendingAction();
+        }
+      }
+    });
+  }
+
+  // Get the last focused window via WINDOW_ACTIVE (kept for backward compat)
+  getFocusedWindow(): window.Window | null {
+    return this.lastFocusedWindow;
+  }
+
+  // Get the last focused window ID
+  getFocusedWindowId(): number {
+    return this.lastFocusedWindowId;
+  }
+
+  // ─── User Interaction Tracking (onTouch-based window targeting) ───
+  //
+  // Called from page root Stack.onTouch() (MainPage/FloatPage, D8) when the user physically touches a window.
+  // ArkUI onTouch bubbles from child to parent, covering MenuBarComponent + webview + drag bars.
+  // Used by tray menu to determine which window to operate on.
+  setUserInteractedWindow(windowId: number): void {
+    this.lastUserInteractedWindowId = windowId;
+    hilog.info(DOMAIN, 'WindowManager', 'User interacted with window: id=%{public}d', windowId);
+  }
+
+  // Get the window the user last physically touched (for Tray menu path)
+  getUserInteractedWindow(): window.Window | null {
+    if (this.lastUserInteractedWindowId < 0) {
+      return null;
+    }
+    return this.getWindow(this.lastUserInteractedWindowId) ?? null;
+  }
+
+  // Get the ID of the window the user last physically touched
+  getUserInteractedWindowId(): number {
+    return this.lastUserInteractedWindowId;
+  }
+
+  // Reset user interaction tracking after window becomes invisible (minimize/hide/close).
+  // Subsequent tray menu operations will fall back to main window.
+  resetUserInteractionTracking(): void {
+    this.lastUserInteractedWindowId = -1;
+  }
+
+  // ─── Window Operation Wrappers ───
+  // These wrappers ensure resetUserInteractionTracking() is called after operations
+  // that make a window invisible (minimize/hide/close).
+
+  async minimizeWindow(windowId: number): Promise<void> {
+    const win = this.getWindow(windowId);
+    if (!win) {
+      hilog.warn(DOMAIN, 'WindowManager', 'minimizeWindow: window %{public}d not found', windowId);
+      return;
+    }
+    await win.minimize();
+    // Only reset tracking if the minimized window was the last interacted one
+    if (this.lastUserInteractedWindowId === windowId) {
+      this.resetUserInteractionTracking();
+    }
+  }
+
+  // Destroy a window and clean up all resources.
+  // Works for both main window (id=0) and sub-windows.
+  async destroyWindow(windowId: number): Promise<void> {
+    const win = this.getWindow(windowId);
+    if (!win) {
+      hilog.warn(DOMAIN, 'WindowManager', 'destroyWindow: window %{public}d not found', windowId);
+      return;
+    }
+    try {
+      await win.destroyWindow();
+    } catch (e) {
+      hilog.warn(DOMAIN, 'WindowManager', 'destroyWindow failed for %{public}d: %{public}s', windowId, String(e));
+    }
+    this.removeWindow(windowId);
+  }
+
+  // Close a sub-window (id > 0): destroy + cleanup + reset.
+  // For main window (id=0): hideAbility() + reset.
+  async closeWindow(windowId: number): Promise<void> {
+    if (windowId <= 0) {
+      // Main window: hide the Ability to background
+      await this.hideAbility();
+      return;
+    }
+    const win = this.getWindow(windowId);
+    if (!win) {
+      hilog.warn(DOMAIN, 'WindowManager', 'closeWindow: window %{public}d not found', windowId);
+      return;
+    }
+    try {
+      await win.destroyWindow();
+    } catch (e) {
+      hilog.warn(DOMAIN, 'WindowManager', 'closeWindow destroy failed for %{public}d: %{public}s', windowId, String(e));
+    }
+    // removeWindow handles conditional resetUserInteractionTracking
+    this.removeWindow(windowId);
+  }
+
+  // Hide the entire Ability (app) to background.
+  // Equivalent to macOS Cmd+H (hide:) — all windows become invisible, process stays alive.
+  async hideAbility(): Promise<void> {
+    if (!this.context) {
+      hilog.warn(DOMAIN, 'WindowManager', 'hideAbility: context not set');
+      return;
+    }
+    try {
+      await this.context.hideAbility();
+      this.resetUserInteractionTracking();
+    } catch (e) {
+      hilog.warn(DOMAIN, 'WindowManager', 'hideAbility failed: %{public}s', String(e));
+    }
+  }
+
+  // ─── Pending Action Management (StatusBar menu race condition) ───
+  //
+  // When a tray menu item is clicked, the system triggers onNewWant → GoForeground
+  // which can undo window operations executed in the menu click callback.
+  //
+  // Solution: defer window operations until RESUMED/WINDOW_ACTIVE event fires,
+  // indicating the system's foreground transition is complete.
+  //
+  // Flow:
+  // 1. Tray menu click → setPendingAction(action) + start 2s cleanup timer
+  // 2. System triggers onNewWant → cancelCleanupTimer()
+  // 3. RESUMED/WINDOW_ACTIVE fires → consumePendingAction() executes the action
+  // 4. If onNewWant never fires (edge case), cleanup timer clears state after 2s
+
+  setPendingAction(action: () => void): void {
+    // Clear any existing pending action
+    this.clearPendingAction();
+
+    this.pendingAction = action;
+    hilog.info(DOMAIN, 'WindowManager',
+      'Pending action set, waiting for system foreground transition');
+
+    // Start safety net cleanup timer (2s)
+    this.cleanupTimer = setTimeout(() => {
+      if (this.pendingAction) {
+        hilog.warn(DOMAIN, 'WindowManager', 'Pending action timeout (2s), cleaning up stale state');
+        this.pendingAction = null;
+      }
+      this.cleanupTimer = null;
+    }, 2000);
+  }
+
+  consumePendingAction(): boolean {
+    if (!this.pendingAction) {
+      return false;
+    }
+
+    const action = this.pendingAction;
+    this.pendingAction = null;
+
+    // Cancel cleanup timer since we're executing the action
+    this.cancelCleanupTimer();
+
+    hilog.info(DOMAIN, 'WindowManager', 'Consuming pending action after system foreground transition');
+    try {
+      action();
+      return true;
+    } catch (e) {
+      hilog.error(DOMAIN, 'WindowManager', 'Failed to execute pending action: %{public}s', String(e));
+      return false;
+    }
+  }
+
+  hasPendingAction(): boolean {
+    return this.pendingAction !== null;
+  }
+
+  cancelCleanupTimer(): void {
+    if (this.cleanupTimer !== null) {
+      clearTimeout(this.cleanupTimer);
+      this.cleanupTimer = null;
+      hilog.info(DOMAIN, 'WindowManager', 'Cleanup timer cancelled');
+    }
+  }
+
+  clearPendingAction(): void {
+    if (this.pendingAction) {
+      hilog.info(DOMAIN, 'WindowManager', 'Clearing pending action without execution');
+      this.pendingAction = null;
+    }
+    this.cancelCleanupTimer();
   }
 
   async createSubWindow(opts: SubWindowOptions): Promise<number> {
@@ -100,6 +334,9 @@ export class WindowManager {
     storage.setOrCreate('windowId', windowId);
     storage.setOrCreate('decorations', decorations);
     this.windows.set(windowId, { window: win, storage });
+
+    // Register focus tracking for sub-window
+    this.registerFocusTracking(win, windowId);
 
     try {
       hilog.info(DOMAIN, 'WindowManager', `Loading content: FloatPage for window %{public}d`, windowId);
@@ -228,8 +465,26 @@ export class WindowManager {
   }
   
   getWindow(id: number): window.Window | undefined {
+    // Main window (id=0) is not in the windows Map, get it from windowStage
+    if (id === 0 && this.windowStage) {
+      try {
+        return this.windowStage.getMainWindowSync();
+      } catch (e) {
+        hilog.warn(DOMAIN, 'WindowManager', 'Failed to get main window: %{public}s', String(e));
+        return undefined;
+      }
+    }
     const entry = this.windows.get(id);
     return entry?.window;
+  }
+
+  getAllWindowIds(): number[] {
+    const ids = Array.from(this.windows.keys());
+    // Include main window (id=0) if windowStage is set
+    if (this.windowStage && !ids.includes(0)) {
+      ids.unshift(0);
+    }
+    return ids;
   }
 
   // Phase 2: Update window decorations at runtime via LocalStorage reactive update
@@ -354,6 +609,11 @@ export class WindowManager {
   // Remove window: clean up all Maps to prevent memory leaks
   removeWindow(windowId: number): void {
     hilog.info(DOMAIN, 'WindowManager', `Removing window %{public}d from all maps`, windowId);
+    // Clear user interaction tracking if this window was the last interacted one
+    if (this.lastUserInteractedWindowId === windowId) {
+      this.lastUserInteractedWindowId = -1;
+      hilog.info(DOMAIN, 'WindowManager', 'Cleared lastUserInteractedWindowId (removed window)');
+    }
     this.windows.delete(windowId);
     this.controllers.delete(windowId);
     this.uiContexts.delete(windowId);
