@@ -71,6 +71,8 @@ function handleWindowNew(
 export interface WebviewStyle {
   x?: number | string;
   y?: number | string;
+  width?: number | string;
+  height?: number | string;
   backgroundColor?: string | Color | number;
   visible?: boolean;
 }
@@ -114,8 +116,8 @@ function WebBuilder(data: WebviewNodeData) {
     controller: data.controller as web_webview.WebviewController,
     renderMode: data?.transparent ? RenderMode.SYNC_RENDER : RenderMode.ASYNC_RENDER
   })
-    .width("100%")
-    .height("100%")
+    .width(data.style?.width ?? "100%")
+    .height(data.style?.height ?? "100%")
     .position({
       x: data.style?.x ?? 0,
       y: data.style?.y ?? 0,
@@ -243,8 +245,8 @@ function EmbeddedWebBuilder(data: WebviewNodeData) {
       controller: data.controller as web_webview.WebviewController,
       renderMode: data?.transparent ? RenderMode.SYNC_RENDER : RenderMode.ASYNC_RENDER
     })
-      .width("100%")
-      .height("100%")
+      .width(data.style?.width ?? "100%")
+      .height(data.style?.height ?? "100%")
       .backgroundColor(convertRRGGBBAAtoAARRGGBB(data?.style?.backgroundColor))
       .javaScriptAccess(data?.javascriptEnable)
       .domStorageAccess(true)
@@ -336,8 +338,12 @@ function EmbeddedWebBuilder(data: WebviewNodeData) {
         handleWindowNew(event, data, 'EmbeddedWebBuilder');
       })
     }
-  .width("100%")
-  .height("100%")
+  .width(data.style?.width ?? "100%")
+  .height(data.style?.height ?? "100%")
+  .position({
+    x: data.style?.x ?? 0,
+    y: data.style?.y ?? 0,
+  })
   .backgroundColor(Color.Transparent)
   .clip(true)
   .visibility(data?.style?.visible === false ? Visibility.Hidden : Visibility.Visible)
@@ -624,6 +630,7 @@ function buildJsHelper(controller: WebviewController): JsHelper {
     webPageSnapshot,
     setBackgroundColor: (_color: number) => {},
     setVisible: (_visible: boolean) => {},
+    setBounds: (_x: number, _y: number, _width: number, _height: number) => {},
     dispose: () => {},
     createPdf,
   } as JsHelper;
@@ -647,8 +654,9 @@ export class RustWebviewNodeController extends NodeController {
       return;
     }
 
-    entry.style = style;
-    node.update(entry);
+    const newEntry: WebviewNodeData = { ...entry, style: style };
+    this.webviewEntries.set(webTag, newEntry);
+    node.update(newEntry);
   }
 
   private buildData(controller: WebviewController) {
@@ -749,8 +757,9 @@ export class EmbeddedWebviewManager {
       return;
     }
 
-    entry.data.style = style;
-    entry.content.update(entry.data);
+    const newData: WebviewNodeData = { ...entry.data, style: style };
+    entry.data = newData;
+    entry.content.update(newData);
   }
 
   removeWebview(webTag: string) {
@@ -769,6 +778,7 @@ declare class WebviewController extends web_webview.WebviewController {
   getCookies: (url: string) => string;
   setBackgroundColor: (color: number) => void;
   setVisible: (visible: boolean) => void;
+  setBounds: (x: number, y: number, width: number, height: number) => void;
   dispose: () => void;
   clearAllBrowsingData: () => void;
 }

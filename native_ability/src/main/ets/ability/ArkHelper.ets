@@ -314,6 +314,10 @@ export function createArkHelper(): ArkHelper {
           applyStyle({ visible });
         };
 
+        ret.controller.setBounds = (x: number, y: number, width: number, height: number) => {
+          applyStyle({ x, y, width, height });
+        };
+
         ret.controller.dispose = () => {
           targetController!.removeWebview(ret.webTag);
         };
@@ -389,6 +393,10 @@ export function createArkHelper(): ArkHelper {
 
         ret.controller.setVisible = (visible: boolean) => {
           applyStyle({ visible });
+        };
+
+        ret.controller.setBounds = (x: number, y: number, width: number, height: number) => {
+          applyStyle({ x, y, width, height });
         };
 
         ret.controller.dispose = () => {

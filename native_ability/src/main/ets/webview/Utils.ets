@@ -54,6 +54,7 @@ export interface JsHelper {
   runJavaScript: (code: string, callback: (result?: string) => void) => void;
   setBackgroundColor: (color: number) => void;
   setVisible: (visible: boolean) => void;
+  setBounds: (x: number, y: number, width: number, height: number) => void;
   dispose: () => void;
   clearAllBrowsingData: () => void;
   webPageSnapshot: () => Promise<SnapshotData>;
@@ -155,6 +156,14 @@ export class ProxyJsHelper implements JsHelper {
       this.realController.setVisible(visible);
     } else {
       this.pendingOperations.push(() => this.realController!.setVisible(visible));
+    }
+  }
+
+  setBounds(x: number, y: number, width: number, height: number): void {
+    if (this.realController) {
+      this.realController.setBounds(x, y, width, height);
+    } else {
+      this.pendingOperations.push(() => this.realController!.setBounds(x, y, width, height));
     }
   }
 

@@ -129,6 +129,7 @@ pub use menu::{
 pub use clipboard::{clipboard_write_image, init_clipboard_tsfn};
 
 // re-export arkui and avoid the need to import it in the lib.rs
+pub use napi_ohos::Either;
 pub use ohos_arkui_binding as arkui;
 pub use ohos_ime_binding as ime;
 pub use ohos_resource_manager_binding as resource_manager;
