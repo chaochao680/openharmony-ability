@@ -3,10 +3,11 @@ import { common } from '@kit.AbilityKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { deviceInfo } from '@kit.BasicServicesKit';
 import { BusinessError } from '@kit.BasicServicesKit';
-import { RustWebviewNodeController, WebviewInitData } from '../webview/DefaultWebview';
+import { RustWebviewNodeController, WebviewInitData, WebviewStyle } from '../webview/DefaultWebview';
 import { ProxyJsHelper } from '../webview/Utils';
 import * as FloatPage from '../components/FloatPage';
 import { DOMAIN } from '../helper/constants';
+import { objectAssign } from '../helper';
 
 interface WindowEntry {
   window: window.Window;
@@ -425,6 +426,29 @@ export class WindowManager {
       hilog.info(DOMAIN, 'WindowManager', `Processing pending init for window ${id}`);
       const result = controller.addWebview(pendingInit);
       this.pendingInits.delete(id);
+
+      // Attach real implementations to result.controller
+      // (same as ArkHelper.ets normal path — without this, ProxyJsHelper replays to no-op stubs)
+      const applyStyle = (style: WebviewStyle) => {
+        objectAssign(pendingInit.style as Record<string, ESObject>, style);
+        controller.updateWebviewStyle(result.webTag, pendingInit.style as WebviewStyle);
+      };
+
+      result.controller.setBackgroundColor = (color: number) => {
+        applyStyle({ backgroundColor: color } as WebviewStyle);
+      };
+
+      result.controller.setVisible = (visible: boolean) => {
+        applyStyle({ visible } as WebviewStyle);
+      };
+
+      result.controller.setBounds = (x: number, y: number, width: number, height: number) => {
+        applyStyle({ x, y, width, height } as WebviewStyle);
+      };
+
+      result.controller.dispose = () => {
+        controller.removeWebview(result.webTag);
+      };
 
       // 2. Activate proxy (bind real Controller to proxy)
       const proxy = this.takePendingJsHelperProxy(id);

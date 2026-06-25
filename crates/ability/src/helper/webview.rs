@@ -8,7 +8,10 @@ use std::{
 use http::{HeaderName, HeaderValue, Request, Response};
 use napi_derive_ohos::napi;
 use napi_ohos::{
-    bindgen_prelude::{CallbackContext, FnArgs, Function, JsObjectValue, JsValue, Object, ObjectRef, PromiseRaw, Uint8Array, Unknown},
+    bindgen_prelude::{
+        CallbackContext, FnArgs, Function, JsObjectValue, JsValue, Object, ObjectRef, PromiseRaw,
+        Uint8Array, Unknown,
+    },
     Either, Error, Result,
 };
 use ohos_web_binding::{ArkWebResponse, CustomProtocolHandler, Web};
@@ -28,6 +31,8 @@ pub struct SnapshotData {
 pub struct WebViewStyle {
     pub x: Option<Either<f64, String>>,
     pub y: Option<Either<f64, String>>,
+    pub width: Option<Either<f64, String>>,
+    pub height: Option<Either<f64, String>>,
     pub visible: Option<bool>,
     pub background_color: Option<u32>,
 }
@@ -308,7 +313,10 @@ impl Webview {
     }
 
     pub fn set_background_color(&self, color: u32) -> Result<()> {
-        crate::debug!("[openharmony-ability] set_background_color(0x{:08X})", color);
+        crate::debug!(
+            "[openharmony-ability] set_background_color(0x{:08X})",
+            color
+        );
         if let Some(env) = get_main_thread_env().borrow().as_ref() {
             let set_background_color_js_function = self
                 .inner
@@ -334,6 +342,27 @@ impl Webview {
                 .get_value(env)?
                 .get_named_property::<Function<'_, bool, ()>>("setVisible")?;
             set_visible_js_function.call(visible)?;
+            Ok(())
+        } else {
+            Err(Error::from_reason("Failed to get main thread env"))
+        }
+    }
+
+    pub fn set_bounds(&self, x: f64, y: f64, width: f64, height: f64) -> Result<()> {
+        crate::debug!(
+            "[openharmony-ability] set_bounds({}, {}, {}, {})",
+            x,
+            y,
+            width,
+            height
+        );
+        if let Some(env) = get_main_thread_env().borrow().as_ref() {
+            let set_bounds_js_function = self.inner.get_value(env)?.get_named_property::<Function<
+                '_,
+                FnArgs<(f64, f64, f64, f64)>,
+                (),
+            >>("setBounds")?;
+            set_bounds_js_function.call((x, y, width, height).into())?;
             Ok(())
         } else {
             Err(Error::from_reason("Failed to get main thread env"))
@@ -477,7 +506,8 @@ impl Webview {
                 Function<'_, bool, ()>,
             )>,
             (),
-        >>("createPdf") {
+        >>("createPdf")
+        {
             Ok(f) => f,
             Err(e) => {
                 callback(false);

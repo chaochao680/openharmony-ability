@@ -79,6 +79,8 @@ export interface WebViewInitData {
 export interface WebViewStyle {
   x?: number | string;
   y?: number | string;
+  width?: number | string;
+  height?: number | string;
   visible?: boolean;
   backgroundColor?: string | Color | number;
 }
