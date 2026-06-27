@@ -4,7 +4,7 @@ import { ComponentContent, NodeController, BuilderNode, FrameNode } from "@ohos.
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { randomString } from "../helper";
 import { OnDownloadStartResult, OnWindowNewResult } from "../ability/type";
-import { getCookies, JsHelper, convertRRGGBBAAtoAARRGGBB, SnapshotData } from "./Utils";
+import { getCookies, setCookie, JsHelper, convertRRGGBBAAtoAARRGGBB, SnapshotData } from "./Utils";
 import { WebHeader } from "@kit.ArkUI";
 import { router } from '@kit.ArkUI';
 import { WindowManager } from '../window/WindowManager';
@@ -436,6 +436,9 @@ function buildJsHelper(controller: WebviewController): JsHelper {
   const getCookiesHelper = (url: string) => {
     return getCookies(url) as string;
   };
+  const setCookieHelper = (url: string, value: string) => {
+    setCookie(url, value);
+  };
   const loadUrl = (url: string, header?: Record<string, string>) => {
     const headers = Object.keys((header || {}) as Record<string, string>).reduce(
       (t, i) => {
@@ -620,6 +623,7 @@ function buildJsHelper(controller: WebviewController): JsHelper {
   return {
     getUrl,
     getCookies: getCookiesHelper,
+    setCookie: setCookieHelper,
     loadUrl,
     loadHtml,
     zoom,
