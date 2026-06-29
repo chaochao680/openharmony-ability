@@ -9,10 +9,35 @@ use ohos_xcomponent_sys::{
     OH_NativeXComponent_MouseEvent_Callback, OH_NativeXComponent_RegisterMouseEventCallback,
     OH_NativeXComponent_RegisterUIInputEventCallback,
     OH_ArkUI_AxisEvent_GetVerticalAxisValue, OH_ArkUI_AxisEvent_GetHorizontalAxisValue,
+    OH_ArkUI_AxisEvent_GetPinchAxisScaleValue, OH_ArkUI_UIInputEvent_GetSourceType,
 };
 
 /// ArkUI input event type for axis (scroll) events.
 const ARKUI_UIINPUTEVENT_TYPE_AXIS: u32 = 2;
+
+/// Input source types from OHOS NDK.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputSourceType {
+    Unknown,
+    Mouse,
+    TouchScreen,
+    Touchpad,
+    Joystick,
+    Keyboard,
+}
+
+impl From<i32> for InputSourceType {
+    fn from(value: i32) -> Self {
+        match value {
+            1 => InputSourceType::Mouse,
+            2 => InputSourceType::TouchScreen,
+            3 => InputSourceType::Touchpad,
+            4 => InputSourceType::Joystick,
+            5 => InputSourceType::Keyboard,
+            _ => InputSourceType::Unknown,
+        }
+    }
+}
 
 /// Mouse action types for OHOS mouse events.
 ///
@@ -204,12 +229,21 @@ pub unsafe fn register_mouse_callbacks(xcomponent_raw: *mut OH_NativeXComponent)
 // ─── Axis (scroll wheel) event support ────────────────────────────────────────
 
 /// Scroll axis event data extracted from ArkUI axis events.
+///
+/// Carries scroll deltas, pinch scale, and the input source type
+/// (mouse vs touchpad) so that consumers can differentiate behavior.
 #[derive(Debug, Clone)]
 pub struct AxisEventData {
     /// Horizontal scroll delta (positive = scroll right).
     pub delta_x: f32,
     /// Vertical scroll delta (positive = scroll down).
     pub delta_y: f32,
+    /// Pinch scale factor from two-finger pinch on touchpad.
+    /// 1.0 = no change, >1.0 = zoom in, <1.0 = zoom out.
+    /// 0.0 = no pinch data in this event.
+    pub pinch_scale: f32,
+    /// Source of the input event (mouse, touchpad, touchscreen, etc.).
+    pub source_type: InputSourceType,
     /// Event timestamp in nanoseconds.
     pub timestamp: i64,
 }
@@ -219,6 +253,8 @@ impl Default for AxisEventData {
         Self {
             delta_x: 0.0,
             delta_y: 0.0,
+            pinch_scale: 0.0,
+            source_type: InputSourceType::Unknown,
             timestamp: 0,
         }
     }
@@ -242,6 +278,8 @@ where
 
 /// Native callback invoked by the OHOS ArkUI runtime for axis (scroll) events.
 ///
+/// Extracts scroll deltas, pinch scale, and input source type from the event.
+///
 /// # Safety
 /// Called by the OHOS runtime. `component` and `event` must be valid pointers.
 pub unsafe extern "C" fn dispatch_axis_event(
@@ -255,16 +293,20 @@ pub unsafe extern "C" fn dispatch_axis_event(
 
     let delta_y = OH_ArkUI_AxisEvent_GetVerticalAxisValue(event as *const _) as f32;
     let delta_x = OH_ArkUI_AxisEvent_GetHorizontalAxisValue(event as *const _) as f32;
+    let pinch_scale = OH_ArkUI_AxisEvent_GetPinchAxisScaleValue(event as *const _) as f32;
+    let source_type = InputSourceType::from(OH_ArkUI_UIInputEvent_GetSourceType(event as *const _));
 
-    // Skip events with no scroll delta.
-    if delta_x == 0.0 && delta_y == 0.0 {
+    // Skip events with no scroll delta and no pinch data.
+    if delta_x == 0.0 && delta_y == 0.0 && pinch_scale == 0.0 {
         return;
     }
 
     let data = AxisEventData {
         delta_x,
         delta_y,
-        timestamp: 0, // AxisEvent doesn't expose timestamp via our current FFI
+        pinch_scale,
+        source_type,
+        timestamp: 0,
     };
 
     AXIS_EVENT_CALLBACK.with_borrow(|f| {
