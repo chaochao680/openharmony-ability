@@ -6,6 +6,10 @@ export const getCookies = (url: string): string => {
   return webview.WebCookieManager.fetchCookieSync(url);
 };
 
+export const setCookie = (url: string, value: string): void => {
+  webview.WebCookieManager.configCookieSync(url, value);
+};
+
 /**
  * Convert `#RRGGBBAA` format from wry to `#AARRGGBB` format accepted by OHOS.
  * Supports string, Color enum, number, and undefined inputs:
@@ -45,6 +49,7 @@ export interface SnapshotData {
 
 export interface JsHelper {
   getCookies: (url: string) => string;
+  setCookie: (url: string, value: string) => void;
   getUrl: () => string;
   loadUrl: (url: string, header?: Record<string, string>) => void;
   loadHtml: (html: string) => void;
@@ -86,6 +91,15 @@ export class ProxyJsHelper implements JsHelper {
 
   getCookies(url: string): string {
     return this.realController ? this.realController.getCookies(url) : '';
+  }
+
+  setCookie(url: string, value: string): void {
+    if (this.realController) {
+      this.realController.setCookie(url, value);
+    } else {
+      hilog.info(DOMAIN, 'ProxyJsHelper', 'Caching setCookie: %{public}s', url);
+      this.pendingOperations.push(() => this.realController!.setCookie(url, value));
+    }
   }
 
   getUrl(): string {

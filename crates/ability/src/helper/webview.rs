@@ -312,6 +312,22 @@ impl Webview {
         }
     }
 
+    /// Set a single cookie for the given url via `WebCookieManager.configCookieSync`.
+    /// `value` must follow the Set-Cookie format (e.g. `name=value; Domain=...; Path=...`).
+    pub fn set_cookie(&self, url: String, value: String) -> Result<()> {
+        if let Some(env) = get_main_thread_env().borrow().as_ref() {
+            let set_cookie_js_function = self.inner.get_value(env)?.get_named_property::<Function<
+                '_,
+                FnArgs<(String, String)>,
+                (),
+            >>("setCookie")?;
+            set_cookie_js_function.call((url, value).into())?;
+            Ok(())
+        } else {
+            Err(Error::from_reason("Failed to get main thread env"))
+        }
+    }
+
     pub fn set_background_color(&self, color: u32) -> Result<()> {
         crate::debug!(
             "[openharmony-ability] set_background_color(0x{:08X})",
