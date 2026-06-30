@@ -264,6 +264,36 @@ impl Webview {
         }
     }
 
+    /// Set web debugging access via `WebviewController.setWebDebuggingAccess`
+    /// (a static global setter). The state is tracked ArkTS-side (OHOS has no
+    /// getter). `open_devtools`/`close_devtools` map to this.
+    pub fn set_web_debugging_access(&self, enabled: bool) -> Result<()> {
+        if let Some(env) = get_main_thread_env().borrow().as_ref() {
+            let set_debugging_js_function = self
+                .inner
+                .get_value(env)?
+                .get_named_property::<Function<'_, bool, ()>>("setWebDebuggingAccess")?;
+            set_debugging_js_function.call(enabled)?;
+            Ok(())
+        } else {
+            Err(Error::from_reason("Failed to get main thread env"))
+        }
+    }
+
+    /// Query the tracked web debugging access state. OHOS has no getter for
+    /// `setWebDebuggingAccess`, so this returns the ArkTS-side tracked value.
+    pub fn is_web_debugging_access(&self) -> Result<bool> {
+        if let Some(env) = get_main_thread_env().borrow().as_ref() {
+            let is_debugging_js_function = self
+                .inner
+                .get_value(env)?
+                .get_named_property::<Function<'_, (), bool>>("isWebDebuggingAccess")?;
+            is_debugging_js_function.call(())
+        } else {
+            Err(Error::from_reason("Failed to get main thread env"))
+        }
+    }
+
     pub fn evaluate_script(&self, js: &str) -> Result<()> {
         self.evaluate_script_with_callback(js, None)
     }
