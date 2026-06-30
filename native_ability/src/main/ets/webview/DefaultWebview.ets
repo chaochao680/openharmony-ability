@@ -4,7 +4,7 @@ import { ComponentContent, NodeController, BuilderNode, FrameNode } from "@ohos.
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { randomString } from "../helper";
 import { OnDownloadStartResult, OnWindowNewResult } from "../ability/type";
-import { getCookies, setCookie, JsHelper, convertRRGGBBAAtoAARRGGBB, SnapshotData } from "./Utils";
+import { getCookies, setCookie, setWebDebuggingAccess, isWebDebuggingAccess, JsHelper, convertRRGGBBAAtoAARRGGBB, SnapshotData } from "./Utils";
 import { WebHeader } from "@kit.ArkUI";
 import { router } from '@kit.ArkUI';
 import { WindowManager } from '../window/WindowManager';
@@ -382,7 +382,7 @@ function ensureWebviewNodeData(data: WebviewInitData): WebviewNodeData {
   prepared.didInitialLoad = prepared.didInitialLoad === true;
 
   if (prepared?.devtools) {
-    web_webview.WebviewController.setWebDebuggingAccess(true);
+    setWebDebuggingAccess(true);
   }
 
   return prepared;
@@ -438,6 +438,12 @@ function buildJsHelper(controller: WebviewController): JsHelper {
   };
   const setCookieHelper = (url: string, value: string) => {
     setCookie(url, value);
+  };
+  const setWebDebuggingAccessHelper = (enabled: boolean) => {
+    setWebDebuggingAccess(enabled);
+  };
+  const isWebDebuggingAccessHelper = (): boolean => {
+    return isWebDebuggingAccess();
   };
   const loadUrl = (url: string, header?: Record<string, string>) => {
     const headers = Object.keys((header || {}) as Record<string, string>).reduce(
@@ -624,6 +630,8 @@ function buildJsHelper(controller: WebviewController): JsHelper {
     getUrl,
     getCookies: getCookiesHelper,
     setCookie: setCookieHelper,
+    setWebDebuggingAccess: setWebDebuggingAccessHelper,
+    isWebDebuggingAccess: isWebDebuggingAccessHelper,
     loadUrl,
     loadHtml,
     zoom,
