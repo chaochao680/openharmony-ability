@@ -123,5 +123,19 @@ struct MainPage {
         }
       }
     })
+    // Track mouse cursor position for cursor_position() API.
+    // NDK DispatchMouseEvent doesn't fire when cursor is over WebView,
+    // so we use ArkTS onMouse which bubbles from all children.
+    .onMouse((event: MouseEvent) => {
+      if (event.action === MouseAction.Move || event.action === MouseAction.Press) {
+        try {
+          if (typeof this.nativeModule?.updateCursorPosition === "function") {
+            this.nativeModule.updateCursorPosition(event.x, event.y);
+          }
+        } catch (e) {
+          // Silently ignore — cursor tracking is best-effort
+        }
+      }
+    })
   }
 }
