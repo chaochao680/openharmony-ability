@@ -156,6 +156,9 @@ export interface ArkHelper {
   autostartEnable: () => Promise<void>;
   autostartDisable: () => Promise<void>;
   autostartIsEnabled: () => Promise<boolean>;
+  registerHotkey: (jsonStr: string) => void;
+  unregisterHotkey: (id: number) => void;
+  unregisterAllHotkeys: () => void;
 }
 
 export interface WindowAvoidAreaInfo {
