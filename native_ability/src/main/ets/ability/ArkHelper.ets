@@ -317,6 +317,9 @@ export function createArkHelper(): ArkHelper {
         ret.controller.setBounds = (x: number, y: number, width: number, height: number) => {
           applyStyle({ x, y, width, height });
         };
+        ret.controller.setBlurRadius = (radius: number) => {
+          applyStyle({ blurRadius: radius });
+        };
 
         ret.controller.dispose = () => {
           targetController!.removeWebview(ret.webTag);
@@ -398,6 +401,9 @@ export function createArkHelper(): ArkHelper {
         ret.controller.setBounds = (x: number, y: number, width: number, height: number) => {
           applyStyle({ x, y, width, height });
         };
+        ret.controller.setBlurRadius = (radius: number) => {
+          applyStyle({ blurRadius: radius });
+        };
 
         ret.controller.dispose = () => {
           manager.removeWebview(ret.webTag);
@@ -469,6 +475,21 @@ export function createArkHelper(): ArkHelper {
         wm.setWindowFocusable(windowId, focusable);
       } catch (err) {
         hilog.error(DOMAIN, 'ArkHelper', 'setWindowFocusable failed: %{public}s', String(err));
+      }
+    },
+
+    setWindowBlur: (windowId: number, radius: number): void => {
+      try {
+        WindowManager.getInstance().applyWindowBlur(windowId, radius);
+      } catch (_err) {
+        // Intentionally no hilog here: this is called from Rust NAPI (NAPI-reentrant ArkTS
+        // context), where hilog throws "Argc mismatch" and would mask the original error.
+        // Note: the error is NOT propagated to Rust — set_window_blur uses TSFN fire-and-forget
+        // (NonBlocking, no return value wait), so Rust receives Ok regardless of ArkTS failure.
+        // applyWindowBlur has internal fallbacks (queue pendingBlurs for build-time inject,
+        // modifier refresh for runtime), so a throw here is non-fatal. If synchronous error
+        // propagation is needed later, switch to call_with_return_value + oneshot (like
+        // clipboard_write_image).
       }
     },
 

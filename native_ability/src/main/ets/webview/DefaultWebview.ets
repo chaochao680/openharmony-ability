@@ -5,7 +5,7 @@ import { hilog } from '@kit.PerformanceAnalysisKit';
 import { randomString } from "../helper";
 import { OnDownloadStartResult, OnWindowNewResult } from "../ability/type";
 import { getCookies, setCookie, setWebDebuggingAccess, isWebDebuggingAccess, JsHelper, convertRRGGBBAAtoAARRGGBB, SnapshotData } from "./Utils";
-import { WebHeader } from "@kit.ArkUI";
+import { WebHeader, AttributeUpdater } from "@kit.ArkUI";
 import { router } from '@kit.ArkUI';
 import { WindowManager } from '../window/WindowManager';
 import { DOMAIN } from '../helper/constants';
@@ -79,6 +79,19 @@ function handleWindowNew(
   }
 }
 
+/**
+ * AttributeUpdater for runtime backdropBlur refresh.
+ * BuilderNode.update does not refresh backdropBlur, so we use AttributeUpdater to
+ * directly modify the Stack's backdropBlur attribute at runtime (setWindowBlur path).
+ * attribute?.backdropBlur(radius) triggers an immediate component update without @State.
+ */
+export class BlurModifier extends AttributeUpdater<CommonAttribute> {
+  initializeModifier(_instance: CommonAttribute): void {
+    // Intentionally empty: let the build-time Stack.backdropBlur(data.style.blurRadius) take
+    // effect. Runtime setWindowBlur refreshes via attribute?.backdropBlur(radius).
+  }
+}
+
 export interface WebviewStyle {
   x?: number | string;
   y?: number | string;
@@ -86,6 +99,7 @@ export interface WebviewStyle {
   height?: number | string;
   backgroundColor?: string | Color | number;
   visible?: boolean;
+  blurRadius?: number;
 }
 
 export interface WebviewInitData {
@@ -117,24 +131,29 @@ export interface WebviewInitData {
 interface WebviewNodeData extends WebviewInitData {
   controller: WebviewController;
   didInitialLoad?: boolean;
+  blurModifier?: BlurModifier;
 }
 
 @Builder
 function WebBuilder(data: WebviewNodeData) {
   // init with empty url and reload with loadUrl or loadData with onControllerAttach
-  Web({
-    src: "",
-    controller: data.controller as web_webview.WebviewController,
-    renderMode: data?.transparent ? RenderMode.SYNC_RENDER : RenderMode.ASYNC_RENDER
-  })
-    .width(data.style?.width ?? "100%")
-    .height(data.style?.height ?? "100%")
-    .position({
-      x: data.style?.x ?? 0,
-      y: data.style?.y ?? 0,
+  // NOTE: data.blurModifier is initialized in addWebview (cannot assign inside @Builder).
+  // Runtime setWindowBlur refreshes backdropBlur via modifier.attribute?.backdropBlur(radius)
+  // because BuilderNode.update does not refresh backdropBlur.
+  Stack() {
+    Web({
+      src: "",
+      controller: data.controller as web_webview.WebviewController,
+      renderMode: data?.transparent ? RenderMode.SYNC_RENDER : RenderMode.ASYNC_RENDER
     })
-    .backgroundColor(convertRRGGBBAAtoAARRGGBB(data?.style?.backgroundColor))
-    .visibility(data?.style?.visible === false ? Visibility.Hidden : Visibility.Visible)
+      .width(data.style?.width ?? "100%")
+      .height(data.style?.height ?? "100%")
+      .position({
+        x: data.style?.x ?? 0,
+        y: data.style?.y ?? 0,
+      })
+      .backgroundColor(convertRRGGBBAAtoAARRGGBB(data?.style?.backgroundColor))
+      .visibility(data?.style?.visible === false ? Visibility.Hidden : Visibility.Visible)
     .javaScriptAccess(data?.javascriptEnable)
     .domStorageAccess(true)
     .mediaPlayGestureAccess(
@@ -243,6 +262,12 @@ function WebBuilder(data: WebviewNodeData) {
     .onWindowNew((event) => {
       handleWindowNew(event, data, 'WebBuilder');
     });
+  }
+  .width("100%")
+  .height("100%")
+  .backgroundColor(Color.Transparent)
+  .backdropBlur(data?.style?.blurRadius ?? 0)
+  .attributeModifier(data.blurModifier)
 }
 
 @Builder
@@ -654,6 +679,7 @@ function buildJsHelper(controller: WebviewController): JsHelper {
     setBackgroundColor: (_color: number) => {},
     setVisible: (_visible: boolean) => {},
     setBounds: (_x: number, _y: number, _width: number, _height: number) => {},
+    setBlurRadius: (_radius: number) => {},
     dispose: () => {},
     createPdf,
   } as JsHelper;
@@ -679,7 +705,37 @@ export class RustWebviewNodeController extends NodeController {
 
     const newEntry: WebviewNodeData = { ...entry, style: style };
     this.webviewEntries.set(webTag, newEntry);
+    // Runtime refresh via AttributeUpdater — node.update does not refresh backdropBlur/backgroundColor,
+    // so Acrylic/Mica tints (set_window_background_color) and blur radius need modifier.attribute to
+    // trigger an immediate component update.
+    if (entry.blurModifier) {
+      if (style.backgroundColor !== undefined && style.backgroundColor !== null) {
+        entry.blurModifier.attribute?.backgroundColor(style.backgroundColor);
+      }
+      if (style.blurRadius !== undefined) {
+        entry.blurModifier.attribute?.backdropBlur(style.blurRadius);
+      }
+    }
     node.update(newEntry);
+  }
+
+  /**
+   * Update blur radius for all webviews managed by this controller.
+   * Called by WindowManager.setWindowBlur() to apply window-level blur effect.
+   */
+  setAllWebviewsBlurRadius(radius: number): void {
+    for (const [webTag, entry] of this.webviewEntries) {
+      // Runtime refresh via AttributeUpdater — BuilderNode.update does not refresh backdropBlur,
+      // so call modifier.attribute?.backdropBlur(radius) which triggers an immediate update.
+      if (entry.blurModifier) {
+        entry.blurModifier.attribute?.backdropBlur(radius);
+      }
+      // Keep style.blurRadius in sync so any subsequent re-build preserves the value.
+      if (!entry.style) {
+        entry.style = {};
+      }
+      entry.style.blurRadius = radius;
+    }
   }
 
   private buildData(controller: WebviewController) {
@@ -699,6 +755,9 @@ export class RustWebviewNodeController extends NodeController {
       data.uiContext = this.uiContext;
     }
     const prepared = ensureWebviewNodeData(data);
+    if (!prepared.blurModifier) {
+      prepared.blurModifier = new BlurModifier();
+    }
     const webTag = prepared.webTag!;
     if (this.rootNode === null) {
       this.rootNode = new FrameNode(this.uiContext!);
@@ -785,6 +844,16 @@ export class EmbeddedWebviewManager {
     entry.content.update(newData);
   }
 
+  /**
+   * Update blur radius for all embedded webviews managed by this manager.
+   * NOTE: EmbeddedWebBuilder does not attach a BlurModifier and content.update does not refresh
+   * backdropBlur, so this is a no-op. Vibrancy is only supported via RustWebviewNodeController
+   * (WebBuilder path). Kept as no-op to satisfy the controller interface.
+   */
+  setAllWebviewsBlurRadius(_radius: number): void {
+    // No-op: embedded webviews do not support runtime backdropBlur refresh.
+  }
+
   removeWebview(webTag: string) {
     const entry = this.entries.get(webTag);
     if (!entry) {
@@ -802,6 +871,7 @@ declare class WebviewController extends web_webview.WebviewController {
   setBackgroundColor: (color: number) => void;
   setVisible: (visible: boolean) => void;
   setBounds: (x: number, y: number, width: number, height: number) => void;
+  setBlurRadius: (radius: number) => void;
   dispose: () => void;
   clearAllBrowsingData: () => void;
 }
