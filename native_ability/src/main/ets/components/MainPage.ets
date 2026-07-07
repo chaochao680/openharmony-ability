@@ -25,11 +25,6 @@ struct MainPage {
   @State private nativeModule: ESObject | null = null;
   @State private resolvedModuleName: string = "";
 
-  // Key repeat test overlay state
-  @State private keyTestVisible: boolean = false;
-  @State private keyTestLog: string[] = [];
-  private pressedKeys: Set<number> = new Set();
-
   private acceleratorMatcher: AcceleratorMatcher = new AcceleratorMatcher();
 
   async aboutToAppear(): Promise<void> {
@@ -109,98 +104,8 @@ struct MainPage {
           }
           return true;
         }
-        // ESC to close key repeat test overlay
-        if (event.type === KeyType.Down && event.keyCode === KeyCode.KEYCODE_ESCAPE && this.keyTestVisible) {
-          this.keyTestVisible = false;
-          this.keyTestLog = [];
-          this.pressedKeys.clear();
-          return true;
-        }
         return false;
       })
-
-      // Floating button to toggle key repeat test overlay
-      Button("⌨ Key Test")
-        .fontSize(11)
-        .height(28)
-        .padding({ left: 8, right: 8 })
-        .backgroundColor(this.keyTestVisible ? "#4CAF50" : "#666")
-        .fontColor(Color.White)
-        .borderRadius(14)
-        .position({ x: "75%", y: "92%" })
-        .opacity(0.8)
-        .onClick(() => {
-          this.keyTestVisible = !this.keyTestVisible;
-          if (!this.keyTestVisible) {
-            this.keyTestLog = [];
-            this.pressedKeys.clear();
-          }
-        })
-
-      // Key repeat test overlay — bypasses WebView, captures keys at ArkUI level
-      if (this.keyTestVisible) {
-        Column() {
-          Row() {
-            Text("Key Repeat Test (ArkUI level)").fontSize(16).fontColor(Color.White).fontWeight(FontWeight.Bold)
-            Blank()
-            Text("✕").fontSize(20).fontColor(Color.White)
-              .onClick(() => {
-                this.keyTestVisible = false;
-                this.keyTestLog = [];
-                this.pressedKeys.clear();
-              })
-          }.width("100%").padding({ left: 16, right: 16, top: 8, bottom: 8 })
-
-          Text("Hold a key to test repeat detection. Press ESC or ✕ to close.")
-            .fontSize(12).fontColor("#AAA").padding({ left: 16, bottom: 8 })
-
-          Scroll() {
-            Column() {
-              ForEach(this.keyTestLog, (item: string) => {
-                Text(item)
-                  .fontSize(13)
-                  .fontFamily("monospace")
-                  .fontColor(item.includes("repeat=true") ? "#4CAF50" : "#CCC")
-                  .fontWeight(item.includes("repeat=true") ? FontWeight.Bold : FontWeight.Normal)
-                  .width("100%")
-              }, (item: string) => item + Math.random())
-            }.width("100%").padding({ left: 16, right: 16 })
-          }.layoutWeight(1)
-        }
-        .id("keyTestOverlay")
-        .width("80%")
-        .height("60%")
-        .backgroundColor("#1E1E1E")
-        .borderRadius(12)
-        .border({ width: 2, color: "#4CAF50" })
-        .shadow({ radius: 20, color: "#00000080" })
-        .focusable(true)
-        .defaultFocus(true)
-        .onKeyEvent((event: KeyEvent) => {
-          const keyCode = event.keyCode;
-          const keyText = event.keyText || `code:${keyCode}`;
-          let isRepeat = false;
-
-          if (event.type === KeyType.Down) {
-            isRepeat = this.pressedKeys.has(keyCode);
-            this.pressedKeys.add(keyCode);
-          } else if (event.type === KeyType.Up) {
-            this.pressedKeys.delete(keyCode);
-          }
-
-          const entry = `key="${keyText}" type=${event.type === KeyType.Down ? "Down" : "Up"} repeat=${isRepeat}`;
-          this.keyTestLog = [...this.keyTestLog.slice(-29), entry];
-          hilog.info(DOMAIN, 'KeyTest', '%{public}s', entry);
-        })
-        .onAppear(() => {
-          // Request focus so onKeyEvent fires for keyboard input
-          try {
-            focusControl.requestFocus("keyTestOverlay");
-          } catch (e) {
-            hilog.warn(DOMAIN, 'KeyTest', 'focusControl failed: %{public}s', String(e));
-          }
-        })
-      }
     }
     .width('100%')
     .height('100%')
