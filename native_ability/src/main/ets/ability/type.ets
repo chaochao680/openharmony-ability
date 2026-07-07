@@ -50,6 +50,7 @@ export interface OnDownloadStartResult {
 
 export interface OnWindowNewResult {
   allow: boolean;
+  isCreate: boolean;
 }
 
 export interface WebViewInitData {
@@ -133,6 +134,8 @@ export interface ArkHelper {
   createOSWindow: (config: WindowConfig) => Promise<number>;
   setWindowDecorations: (windowId: number, decorations: boolean) => void;
   setWindowBackgroundColor: (windowId: number, color: number) => void;
+  focusWindow: (windowId: number) => void;
+  setWindowFocusable: (windowId: number, focusable: boolean) => void;
   loadUrl: (id: number, url: string) => void;
   createMenu?: (options: MenuCreateOptions) => Promise<string>;
   createMenuItem?: (options: MenuItemCreateOptions) => Promise<string>;

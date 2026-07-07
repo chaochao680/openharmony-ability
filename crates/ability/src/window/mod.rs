@@ -1,5 +1,5 @@
-use napi_ohos::bindgen_prelude::*;
 use crate::{get_helper, get_main_thread_env};
+use napi_ohos::bindgen_prelude::*;
 use std::sync::atomic::{AtomicI64, Ordering};
 
 /// Global window ID generator to ensure unique IDs across Rust and ArkTS.
@@ -49,6 +49,18 @@ impl Default for WindowCreateParams {
     }
 }
 
+/// Generates a unique window ID for use when creating sub-windows
+/// outside of `create_os_window` (e.g., from `handleWindowNew` when
+/// `window_kind == "window"`). Uses the same `NEXT_WINDOW_ID` counter to
+/// ensure no collision with Rust-created windows.
+///
+/// Currently unused — reserved for future when `OnWindowNewResult` carries
+/// a pre-generated window ID for ArkTS-side sub-window creation.
+#[allow(dead_code)]
+pub fn generate_window_id() -> i64 {
+    NEXT_WINDOW_ID.fetch_add(1, Ordering::SeqCst)
+}
+
 /// Creates a new OS-level window on OpenHarmony.
 ///
 /// Uses `WindowCreateParams` to pass all window attributes (geometry, decorations,
@@ -67,13 +79,14 @@ pub fn create_os_window(params: WindowCreateParams) -> napi_ohos::Result<i64> {
                 e
             })?;
 
-            let func = match obj.get_named_property::<Function<'_, Object, Unknown>>("createOSWindow") {
-                Ok(f) => f,
-                Err(e) => {
-                    crate::error!("Property 'createOSWindow' NOT FOUND on helper: {:?}", e);
-                    return Err(e);
-                }
-            };
+            let func =
+                match obj.get_named_property::<Function<'_, Object, Unknown>>("createOSWindow") {
+                    Ok(f) => f,
+                    Err(e) => {
+                        crate::error!("Property 'createOSWindow' NOT FOUND on helper: {:?}", e);
+                        return Err(e);
+                    }
+                };
 
             crate::info!("Successfully found createOSWindow, building config object...");
 
@@ -131,7 +144,8 @@ pub fn set_window_decorations(window_id: i64, decorations: bool) -> napi_ohos::R
                 e
             })?;
 
-            let func = obj.get_named_property::<Function<'_, (i64, bool), ()>>("setWindowDecorations")?;
+            let func =
+                obj.get_named_property::<Function<'_, (i64, bool), ()>>("setWindowDecorations")?;
             func.call((window_id, decorations))?;
             return Ok(());
         } else {
@@ -160,8 +174,65 @@ pub fn set_window_background_color(window_id: i64, color: u32) -> napi_ohos::Res
                 e
             })?;
 
-            let func = obj.get_named_property::<Function<'_, (i64, u32), ()>>("setWindowBackgroundColor")?;
+            let func =
+                obj.get_named_property::<Function<'_, (i64, u32), ()>>("setWindowBackgroundColor")?;
             func.call((window_id, color))?;
+            return Ok(());
+        } else {
+            crate::error!("Main thread env not available");
+        }
+    } else {
+        crate::error!("Helper object not initialized");
+    }
+    Err(Error::from_reason("Helper or Env not initialized"))
+}
+
+/// Brings a Float sub-window to the front and focuses it.
+///
+/// Calls ArkTS `focusWindow(windowId)` which calls OHOS `window.Window.raiseToAppTop()`.
+/// Requires OHOS API 14+.
+///
+/// **Note**: This is a fire-and-forget call — the ArkTS `raiseToAppTop()` is async,
+/// but this function returns `Ok(())` synchronously after dispatching the NAPI call.
+/// If the ArkTS side fails, the error is logged via `hilog` but not propagated to Rust.
+/// For the main window (windowId = 0), this is a no-op (focus is OS-managed).
+pub fn focus_window(window_id: i64) -> napi_ohos::Result<()> {
+    let ret = unsafe { get_helper() };
+    if let Some(h) = ret.borrow().as_ref() {
+        if let Some(env) = get_main_thread_env().borrow().as_ref() {
+            let obj = h.get_value(env).map_err(|e| {
+                crate::error!("Failed to get helper object value: {:?}", e);
+                e
+            })?;
+
+            let func = obj.get_named_property::<Function<'_, i64, ()>>("focusWindow")?;
+            func.call(window_id)?;
+            return Ok(());
+        } else {
+            crate::error!("Main thread env not available");
+        }
+    } else {
+        crate::error!("Helper object not initialized");
+    }
+    Err(Error::from_reason("Helper or Env not initialized"))
+}
+
+/// Sets whether a Float sub-window can receive focus.
+///
+/// Calls ArkTS `setWindowFocusable(windowId, focusable)` which calls
+/// OHOS `window.Window.setWindowFocusable(isFocusable)`.
+pub fn set_window_focusable(window_id: i64, focusable: bool) -> napi_ohos::Result<()> {
+    let ret = unsafe { get_helper() };
+    if let Some(h) = ret.borrow().as_ref() {
+        if let Some(env) = get_main_thread_env().borrow().as_ref() {
+            let obj = h.get_value(env).map_err(|e| {
+                crate::error!("Failed to get helper object value: {:?}", e);
+                e
+            })?;
+
+            let func =
+                obj.get_named_property::<Function<'_, (i64, bool), ()>>("setWindowFocusable")?;
+            func.call((window_id, focusable))?;
             return Ok(());
         } else {
             crate::error!("Main thread env not available");

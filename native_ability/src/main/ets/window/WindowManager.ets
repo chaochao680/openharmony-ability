@@ -176,6 +176,32 @@ export class WindowManager {
     }
   }
 
+  focusWindow(windowId: number): void {
+    const win = this.getWindow(windowId);
+    if (!win) {
+      hilog.warn(DOMAIN, 'WindowManager', 'focusWindow: window %{public}d not found', windowId);
+      return;
+    }
+    win.raiseToAppTop().then(() => {
+      hilog.debug(DOMAIN, 'WindowManager', 'focusWindow: window %{public}d raised to top', windowId);
+    }).catch((err: ESObject) => {
+      hilog.error(DOMAIN, 'WindowManager', 'focusWindow: raiseToAppTop failed: %{public}s', String(err));
+    });
+  }
+
+  setWindowFocusable(windowId: number, focusable: boolean): void {
+    const win = this.getWindow(windowId);
+    if (!win) {
+      hilog.warn(DOMAIN, 'WindowManager', 'setWindowFocusable: window %{public}d not found', windowId);
+      return;
+    }
+    win.setWindowFocusable(focusable).then(() => {
+      hilog.debug(DOMAIN, 'WindowManager', 'setWindowFocusable: window %{public}d focusable=%{public}s', windowId, String(focusable));
+    }).catch((err: ESObject) => {
+      hilog.error(DOMAIN, 'WindowManager', 'setWindowFocusable failed: %{public}s', JSON.stringify(err));
+    });
+  }
+
   // Destroy a window and clean up all resources.
   // Works for both main window (id=0) and sub-windows.
   async destroyWindow(windowId: number): Promise<void> {
@@ -528,52 +554,30 @@ export class WindowManager {
     }
   }
 
-  // Phase 3: Update window background color at runtime
   setWindowBackgroundColor(windowId: number, color: number): void {
     const colorStr = '#' + color.toString(16).padStart(8, '0');
-    hilog.info(DOMAIN, 'WindowManager', `setWindowBackgroundColor: windowId=%{public}d, color=%{public}s`, windowId, colorStr);
+    hilog.debug(DOMAIN, 'WindowManager', `setWindowBackgroundColor: windowId=%{public}d, color=%{public}s`, windowId, colorStr);
     if (windowId === 0 && this.windowStage) {
-      // Main window
       try {
         const mainWindow = this.windowStage.getMainWindowSync();
         mainWindow.setWindowBackgroundColor(colorStr);
-        // On 2in1 devices, also set container color for full transparency (requires API 20+)
         if (deviceInfo.sdkApiVersion >= 20) {
           try {
             mainWindow.setWindowContainerColor(colorStr, colorStr);
           } catch (containerErr: any) {
-            if (containerErr.code === 801) {
-              hilog.debug(DOMAIN, 'WindowManager', 'setWindowContainerColor not supported on this device (error 801)');
-            } else if (containerErr.code === 201) {
-              hilog.error(DOMAIN, 'WindowManager', 'setWindowContainerColor permission denied (error 201): missing ohos.permission.SET_WINDOW_TRANSPARENT');
-            } else {
-              hilog.error(DOMAIN, 'WindowManager', `Failed to set container color: code=%{public}d, message=%{public}s`, containerErr.code, containerErr.message);
-            }
+            hilog.debug(DOMAIN, 'WindowManager', 'setWindowContainerColor: code=%{public}d', containerErr.code);
           }
         }
       } catch (e) {
-        hilog.error(DOMAIN, 'WindowManager', `Failed to set main window background: %{public}s`, JSON.stringify(e));
+        hilog.error(DOMAIN, 'WindowManager', `Failed to set main window background: %{public}s`, String(e));
       }
     } else {
       const entry = this.windows.get(windowId);
-      if (entry) {
+      if (entry?.window) {
         try {
           entry.window.setWindowBackgroundColor(colorStr);
-          if (deviceInfo.sdkApiVersion >= 20) {
-            try {
-              entry.window.setWindowContainerColor(colorStr, colorStr);
-            } catch (containerErr: any) {
-              if (containerErr.code === 801) {
-                hilog.debug(DOMAIN, 'WindowManager', 'setWindowContainerColor not supported on this device (error 801)');
-              } else if (containerErr.code === 201) {
-                hilog.error(DOMAIN, 'WindowManager', 'setWindowContainerColor permission denied (error 201): missing ohos.permission.SET_WINDOW_TRANSPARENT');
-              } else {
-                hilog.warn(DOMAIN, 'WindowManager', `Sub-window container color failed: code=%{public}d`, containerErr.code);
-              }
-            }
-          }
-        } catch (e) {
-          hilog.warn(DOMAIN, 'WindowManager', `Failed to set background for window %{public}d: %{public}s`, windowId, JSON.stringify(e));
+        } catch (err) {
+          hilog.error(DOMAIN, 'WindowManager', `Sub-window %{public}d background failed: %{public}s`, windowId, String(err));
         }
       }
     }
