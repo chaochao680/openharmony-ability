@@ -25,7 +25,8 @@ const DEFAULT_PDF_CONFIG: web_webview.PdfConfiguration = {
 
 /**
  * Shared onWindowNew handler for both WebBuilder and EmbeddedWebBuilder.
- * Parses event params, calls the NAPI callback, and either opens a dialog or denies.
+ * Parses event params, calls the NAPI callback, and either opens a dialog,
+ * creates a real OS sub-window, or denies.
  */
 function handleWindowNew(
   event: { targetUrl?: string; isAlert?: boolean; isUserTrigger?: boolean; handler: { setWebController: (ctrl: web_webview.WebviewController | null) => void } },
@@ -40,11 +41,21 @@ function handleWindowNew(
   try {
     if (typeof data?.onWindowNew === 'function') {
       const result: OnWindowNewResult = data.onWindowNew(targetUrl, isAlert, isUserTrigger);
-      if (result.allow) {
+      hilog.debug(DOMAIN, 'DefaultWebview', '%{public}s onWindowNew: result={allow:%{public}s, isCreate:%{public}s}', tag, String(result.allow), String(result.isCreate));
+      if (result.isCreate) {
+        // Create mode: the Tauri user's handler already created a real OS window
+        // via WebviewWindowBuilder::build() → createOSWindow.
+        // Call setWebController(null) to tell ArkWeb NOT to create its own window,
+        // preventing double windows.
+        // Note: if the handler failed to create a window, this results in a silent no-op
+        // (no dialog, no window). The handler should log errors on its side.
+        hilog.debug(DOMAIN, 'DefaultWebview', '%{public}s onWindowNew: CREATE — OS window already created by handler', tag);
+        event.handler.setWebController(null);
+      } else if (result.allow) {
+        // Allow mode: open in-page dialog
         hilog.debug(DOMAIN, 'DefaultWebview', '%{public}s onWindowNew: ALLOW — opening dialog', tag);
         const newCtrl = new web_webview.WebviewController();
         event.handler.setWebController(newCtrl);
-        // Defer dialog to next tick so the callback returns immediately
         if (data?.uiContext) {
           const uiCtx = data.uiContext;
           setTimeout(() => {

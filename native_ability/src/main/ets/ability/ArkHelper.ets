@@ -454,6 +454,24 @@ export function createArkHelper(): ArkHelper {
       }
     },
 
+    focusWindow: (windowId: number): void => {
+      try {
+        const wm = WindowManager.getInstance();
+        wm.focusWindow(windowId);
+      } catch (err) {
+        hilog.error(DOMAIN, 'ArkHelper', 'focusWindow failed: %{public}s', String(err));
+      }
+    },
+
+    setWindowFocusable: (windowId: number, focusable: boolean): void => {
+      try {
+        const wm = WindowManager.getInstance();
+        wm.setWindowFocusable(windowId, focusable);
+      } catch (err) {
+        hilog.error(DOMAIN, 'ArkHelper', 'setWindowFocusable failed: %{public}s', String(err));
+      }
+    },
+
     loadUrl: (id: number, url: string): void => {
       try {
         hilog.info(DOMAIN, 'ArkHelper', 'loadUrl called for window %{public}d: %{public}s', id, url);

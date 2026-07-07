@@ -91,10 +91,13 @@ pub struct DownloadStartResult {
 
 /// Result of the `on_window_new` NAPI callback.
 /// ArkTS reads `allow` to decide whether to call `setWebController(ctrl)` or `setWebController(null)`.
+/// `is_create` controls the window creation mode: true creates a real OS sub-window
+/// (user handler already created it), false uses the in-page dialog.
 #[napi(object)]
 #[derive(Debug, Clone, Default)]
 pub struct OnWindowNewResult {
     pub allow: bool,
+    pub is_create: bool,
 }
 
 type OnDownloadStart<'a> = Option<Function<'a, (String, String), DownloadStartResult>>;
