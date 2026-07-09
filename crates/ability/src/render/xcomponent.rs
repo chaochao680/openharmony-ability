@@ -32,6 +32,12 @@ pub fn render(
         crate::error!("init_clipboard_tsfn failed: {}", e);
     }
 
+    // Initialize vibrancy ThreadsafeFunctions (set_window_blur / set_window_background_color)
+    // for cross-thread calls without needing the main-thread thread_local Env.
+    if let Err(e) = crate::window::init_vibrancy_tsfn(env) {
+        crate::error!("init_vibrancy_tsfn failed: {}", e);
+    }
+
     // Initialize permission request threadsafe function
     let _ = create_permission_request_tsfn(env);
 

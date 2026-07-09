@@ -77,6 +77,7 @@ export interface JsHelper {
   setBackgroundColor: (color: number) => void;
   setVisible: (visible: boolean) => void;
   setBounds: (x: number, y: number, width: number, height: number) => void;
+  setBlurRadius: (radius: number) => void;
   dispose: () => void;
   clearAllBrowsingData: () => void;
   webPageSnapshot: () => Promise<SnapshotData>;
@@ -207,6 +208,14 @@ export class ProxyJsHelper implements JsHelper {
       this.realController.setBounds(x, y, width, height);
     } else {
       this.pendingOperations.push(() => this.realController!.setBounds(x, y, width, height));
+    }
+  }
+
+  setBlurRadius(radius: number): void {
+    if (this.realController) {
+      this.realController.setBlurRadius(radius);
+    } else {
+      this.pendingOperations.push(() => this.realController!.setBlurRadius(radius));
     }
   }
 

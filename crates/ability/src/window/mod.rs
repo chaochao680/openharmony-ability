@@ -1,6 +1,9 @@
-use crate::{get_helper, get_main_thread_env};
 use napi_ohos::bindgen_prelude::*;
+use napi_ohos::threadsafe_function::{ThreadsafeCallContext, ThreadsafeFunction, ThreadsafeFunctionCallMode};
+use napi_ohos::Env;
+use crate::{get_helper, get_main_thread_env};
 use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::OnceLock;
 
 /// Global window ID generator to ensure unique IDs across Rust and ArkTS.
 static NEXT_WINDOW_ID: AtomicI64 = AtomicI64::new(1);
@@ -165,26 +168,84 @@ pub fn set_window_decorations(window_id: i64, decorations: bool) -> napi_ohos::R
 /// `color` is in `0xAARRGGBB` format (e.g., `0x00000000` = fully transparent).
 ///
 /// Phase 3 implementation.
-pub fn set_window_background_color(window_id: i64, color: u32) -> napi_ohos::Result<()> {
-    let ret = unsafe { get_helper() };
-    if let Some(h) = ret.borrow().as_ref() {
-        if let Some(env) = get_main_thread_env().borrow().as_ref() {
-            let obj = h.get_value(env).map_err(|e| {
-                crate::error!("Failed to get helper object value: {:?}", e);
-                e
-            })?;
 
-            let func =
-                obj.get_named_property::<Function<'_, (i64, u32), ()>>("setWindowBackgroundColor")?;
-            func.call((window_id, color))?;
-            return Ok(());
-        } else {
-            crate::error!("Main thread env not available");
-        }
-    } else {
-        crate::error!("Helper object not initialized");
+// ─── TSFN for cross-thread vibrancy calls (threadsafe, no main-thread Env needed) ───
+// Fire-and-forget (NonBlocking, no return value wait): applyWindowBlur queues pendingBlurs
+// (build-time inject via registerController) or calls setAllWebviewsBlurRadius (runtime
+// modifier refresh), both idempotent, so no synchronous result needed.
+type SetWindowBlurTsfn = ThreadsafeFunction<(i64, f64), (), FnArgs<(i64, f64)>, Status, false>;
+type SetWindowBgColorTsfn = ThreadsafeFunction<(i64, u32), (), FnArgs<(i64, u32)>, Status, false>;
+
+static TSFN_SET_WINDOW_BLUR: OnceLock<SetWindowBlurTsfn> = OnceLock::new();
+static TSFN_SET_WINDOW_BG_COLOR: OnceLock<SetWindowBgColorTsfn> = OnceLock::new();
+
+/// Initialize vibrancy ThreadsafeFunctions. Must be called on ArkTS main thread (during
+/// ArkHelper setup, like init_clipboard_tsfn). After init, set_window_blur /
+/// set_window_background_color are callable from any thread (TSFN is threadsafe, does not
+/// need the thread_local MAIN_THREAD_ENV, so no run_on_main_thread required).
+pub fn init_vibrancy_tsfn(env: &Env) -> Result<()> {
+    if TSFN_SET_WINDOW_BLUR.get().is_some() {
+        return Ok(());
     }
-    Err(Error::from_reason("Helper or Env not initialized"))
+    let helper_obj = {
+        let helper_rc = unsafe { get_helper() };
+        let helper_guard = helper_rc.borrow();
+        let helper_ref = helper_guard
+            .as_ref()
+            .ok_or_else(|| Error::from_reason("ArkHelper not initialized"))?;
+        helper_ref.get_value(env)?
+    };
+
+    let blur_fn: Function<'_, FnArgs<(i64, f64)>, ()> = helper_obj
+        .get_named_property("setWindowBlur")
+        .map_err(|e| Error::from_reason(format!("setWindowBlur not found: {}", e)))?;
+    let blur_tsfn = blur_fn
+        .build_threadsafe_function::<(i64, f64)>()
+        .callee_handled::<false>()
+        .build_callback(move |ctx: ThreadsafeCallContext<(i64, f64)>| {
+            Ok(FnArgs { data: ctx.value })
+        })?;
+    let _ = TSFN_SET_WINDOW_BLUR.set(blur_tsfn);
+
+    let bg_fn: Function<'_, FnArgs<(i64, u32)>, ()> = helper_obj
+        .get_named_property("setWindowBackgroundColor")
+        .map_err(|e| Error::from_reason(format!("setWindowBackgroundColor not found: {}", e)))?;
+    let bg_tsfn = bg_fn
+        .build_threadsafe_function::<(i64, u32)>()
+        .callee_handled::<false>()
+        .build_callback(move |ctx: ThreadsafeCallContext<(i64, u32)>| {
+            Ok(FnArgs { data: ctx.value })
+        })?;
+    let _ = TSFN_SET_WINDOW_BG_COLOR.set(bg_tsfn);
+
+    Ok(())
+}
+
+/// Sets window background color via TSFN (threadsafe, callable from any thread).
+pub fn set_window_background_color(window_id: i64, color: u32) -> napi_ohos::Result<()> {
+    let tsfn = TSFN_SET_WINDOW_BG_COLOR.get()
+        .ok_or_else(|| Error::from_reason("set_window_background_color TSFN not initialized"))?;
+    let status = tsfn.call((window_id, color), ThreadsafeFunctionCallMode::NonBlocking);
+    if status != Status::Ok {
+        return Err(Error::from_reason(format!("TSFN call failed: {:?}", status)));
+    }
+    Ok(())
+}
+
+/// Sets window blur radius via TSFN (threadsafe, callable from any thread).
+///
+/// Calls ArkTS `setWindowBlur(windowId, radius)` handler which applies
+/// `backdropBlur(radius)` to the WebView container component.
+///
+/// `radius` is the blur radius in pixels (0 = no blur).
+pub fn set_window_blur(window_id: i64, radius: f64) -> napi_ohos::Result<()> {
+    let tsfn = TSFN_SET_WINDOW_BLUR.get()
+        .ok_or_else(|| Error::from_reason("set_window_blur TSFN not initialized"))?;
+    let status = tsfn.call((window_id, radius), ThreadsafeFunctionCallMode::NonBlocking);
+    if status != Status::Ok {
+        return Err(Error::from_reason(format!("TSFN call failed: {:?}", status)));
+    }
+    Ok(())
 }
 
 /// Brings a Float sub-window to the front and focuses it.

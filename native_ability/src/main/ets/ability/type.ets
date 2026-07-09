@@ -136,6 +136,7 @@ export interface ArkHelper {
   setWindowBackgroundColor: (windowId: number, color: number) => void;
   focusWindow: (windowId: number) => void;
   setWindowFocusable: (windowId: number, focusable: boolean) => void;
+  setWindowBlur: (windowId: number, radius: number) => void;
   loadUrl: (id: number, url: string) => void;
   createMenu?: (options: MenuCreateOptions) => Promise<string>;
   createMenuItem?: (options: MenuItemCreateOptions) => Promise<string>;

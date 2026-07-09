@@ -59,6 +59,8 @@ export class WindowManager {
   private pendingUrls: Map<number, string> = new Map();
   // Pending WebView init queue (resolves race conditions)
   private pendingInits: Map<number, WebviewInitData> = new Map();
+  // Pending window blur queue (vibrancy effect applied before webview controller is ready)
+  private pendingBlurs: Map<number, number> = new Map();
 
   private constructor(context: common.UIAbilityContext) {
     this.context = context;
@@ -444,12 +446,27 @@ export class WindowManager {
   // Trigger load when page initialization is complete and Controller is registered
   registerController(id: number, controller: RustWebviewNodeController): void {
     hilog.info(DOMAIN, 'WindowManager', `Controller registered for window: %{public}d`, id);
+    // pendingBlurs key is normalized to number (applyWindowBlur stores Number(windowId)
+    // because Rust NAPI i64 arrives as BigInt).
+    const pb = this.pendingBlurs.get(Number(id));
+    if (pb !== undefined) {
+      this.pendingBlurs.delete(Number(id));
+    }
+    const injectBlur = (data: WebviewInitData): void => {
+      if (pb !== undefined) {
+        if (!data.style) {
+          data.style = {};
+        }
+        data.style.blurRadius = pb;
+      }
+    };
     this.controllers.set(id, controller);
 
     // 1. Process pending WebView init requests (resolves race conditions)
     const pendingInit = this.pendingInits.get(id);
     if (pendingInit) {
       hilog.info(DOMAIN, 'WindowManager', `Processing pending init for window ${id}`);
+      injectBlur(pendingInit);
       const result = controller.addWebview(pendingInit);
       this.pendingInits.delete(id);
 
@@ -488,7 +505,9 @@ export class WindowManager {
     const pendingUrl = this.pendingUrls.get(id);
     if (pendingUrl) {
       hilog.info(DOMAIN, 'WindowManager', `Pending URL found! Triggering load for window ${id}: ${pendingUrl}`);
-      controller.addWebview({ url: pendingUrl });
+      const urlData: WebviewInitData = { url: pendingUrl };
+      injectBlur(urlData);
+      controller.addWebview(urlData);
       this.pendingUrls.delete(id);
     } else {
       hilog.info(DOMAIN, 'WindowManager', `No pending URL for window ${id}. Waiting for command.`);
@@ -583,7 +602,24 @@ export class WindowManager {
     }
   }
 
-  // Phase 2: Hide system status bar for main window (decorations=false)
+  // Window vibrancy: Apply backdrop blur to WebView container component.
+  // NOTE: backdropBlur must be applied at webview BUILD time (BuilderNode.update
+  // does not refresh .backdropBlur). The blur radius is queued here and consumed
+  // when the webview node is built. No hilog calls inside this method — hilog
+  // throws "Argc mismatch" when invoked from a NAPI-reentrant ArkTS context.
+  applyWindowBlur(windowId: number, radius: number): void {
+    // windowId arrives from Rust NAPI as i64 → BigInt (1n). Normalize to number
+    // so it matches the ArkTS number keys used by registerController.
+    const id = Number(windowId);
+    this.pendingBlurs.set(id, radius);
+    // Runtime refresh: if the window's controller is already registered, apply blur immediately
+    // via AttributeUpdater (BuilderNode.update does not refresh backdropBlur). For not-yet-built
+    // windows, registerController will inject blurRadius from pendingBlurs at build time.
+    const controller = this.controllers.get(id);
+    if (controller) {
+      controller.setAllWebviewsBlurRadius(radius);
+    }
+  }
   private hideSystemBar(): void {
     if (!this.windowStage) return;
     try {
