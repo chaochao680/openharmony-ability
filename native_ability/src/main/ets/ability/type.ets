@@ -29,6 +29,7 @@ export interface WindowStageEventCallback {
   onWindowStageCreate: () => void;
   onWindowStageDestroy: () => void;
   onAbilityCreate: (arg: string) => void;
+  onAbilityCreateWithWant: (data: { uri: string }) => void;
   onAbilityDestroy: () => void;
   onAbilitySaveState: () => string;
   onWindowStageEvent: (arg: number) => void;

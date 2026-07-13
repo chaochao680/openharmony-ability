@@ -819,6 +819,40 @@ pub fn take_want_parameters() -> String {
     }
 }
 
+// --- initial want.uri storage for deep-link plugin (cold start onCreate) ---
+
+#[cfg(target_env = "ohos")]
+static INITIAL_WANT_URI: Mutex<String> = Mutex::new(String::new());
+
+#[cfg(target_env = "ohos")]
+pub(crate) fn store_initial_want_uri(uri: &str) {
+    match INITIAL_WANT_URI.lock() {
+        Ok(mut u) => *u = uri.to_string(),
+        Err(e) => crate::error!("INITIAL_WANT_URI mutex poisoned in store: {}", e),
+    }
+}
+
+/// Returns the initial `want.uri` from `onCreate` (cold start), then clears it.
+///
+/// Used by tauri-plugin-deep-link's `init_deep_link` to inject the first-launch
+/// URL into `current` (pull model, no Event variant).
+///
+/// # Concurrency
+/// - `store` is called from the ArkTS main thread (via NAPI `on_ability_create_with_want` closure)
+/// - `take` is called from the tauri plugin setup thread (via `init_deep_link`)
+/// - Cross-thread safety is ensured by `Mutex<String>`
+/// - `take` semantics: read-once (clears after read)
+#[cfg(target_env = "ohos")]
+pub fn take_initial_want_uri() -> String {
+    match INITIAL_WANT_URI.lock() {
+        Ok(mut u) => std::mem::take(&mut *u),
+        Err(e) => {
+            crate::error!("INITIAL_WANT_URI mutex poisoned in take: {}", e);
+            String::new()
+        }
+    }
+}
+
 /// Tests for WANT_PARAMETERS global static.
 /// Combined into a single #[test] to avoid parallel execution races on the shared static.
 #[cfg(test)]

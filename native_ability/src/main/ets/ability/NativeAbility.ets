@@ -128,6 +128,12 @@ export class NativeAbility extends UIAbility {
       } catch (e) {
         hilog.error(DOMAIN, 'NativeAbility', 'onAbilityCreate failed: %{public}s', String(e));
       }
+      try {
+        hilog.info(DOMAIN, 'NativeAbility', 'onAbilityCreateWithWant want.uri: %{public}s', want.uri ?? '');
+        lifecycle.windowStageEventCallback.onAbilityCreateWithWant?.({ uri: want.uri ?? '' });
+      } catch (e) {
+        hilog.error(DOMAIN, 'NativeAbility', 'onAbilityCreateWithWant failed: %{public}s', String(e));
+      }
     }
   }
 
