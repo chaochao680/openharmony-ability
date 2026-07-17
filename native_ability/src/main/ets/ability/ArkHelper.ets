@@ -22,6 +22,19 @@ import {
   WebviewInitData,
 } from "../webview/DefaultWebview";
 import { WindowManager } from "../window/WindowManager";
+
+// Safe error logging for NAPI-reentrant contexts.
+// hilog.error may throw "Argc mismatch" when called from Rust's synchronous func.call
+// (NAPI reentrant context, per C5 constraint). This wrapper catches any hilog failure
+// and falls back to console, ensuring the catch block itself never throws.
+function safeLogError(op: string, err: ESObject): void {
+  try {
+    hilog.error(0x0000, 'ArkHelper', '%{public}s failed: %{public}s', op, JSON.stringify(err));
+  } catch (_e) {
+    // hilog itself failed (NAPI reentrant context) — fall back to console
+    console.error(`[ArkHelper] ${op} failed: ${JSON.stringify(err)}`);
+  }
+}
 import { JsHelper, ProxyJsHelper } from "../webview/Utils";
 import {
   getAbilityContext,
@@ -476,6 +489,63 @@ export function createArkHelper(): ArkHelper {
       } catch (err) {
         hilog.error(DOMAIN, 'ArkHelper', 'setWindowFocusable failed: %{public}s', String(err));
       }
+    },
+
+    // ─── Window operations (ohos-window-ops) ───
+
+    moveWindowTo: (params: ESObject): void => {
+      try {
+        const windowId = Number(params.windowId);
+        const x = Number(params.x);
+        const y = Number(params.y);
+        WindowManager.getInstance().moveWindowTo(windowId, x, y);
+      }
+      catch (err) { safeLogError('moveWindowTo', err); }
+    },
+
+    resizeWindow: (params: ESObject): void => {
+      try {
+        const windowId = Number(params.windowId);
+        const width = Number(params.width);
+        const height = Number(params.height);
+        WindowManager.getInstance().resizeWindow(windowId, width, height);
+      }
+      catch (err) { safeLogError('resizeWindow', err); }
+    },
+
+    maximizeWindow: (windowId: number): void => {
+      try { WindowManager.getInstance().maximizeWindow(windowId); }
+      catch (err) { safeLogError('maximizeWindow', err); }
+    },
+
+    minimizeWindow: (windowId: number): void => {
+      try { WindowManager.getInstance().minimizeWindow(windowId); }
+      catch (err) { safeLogError('minimizeWindow', err); }
+    },
+
+    restoreWindow: (windowId: number): void => {
+      try { WindowManager.getInstance().restoreWindow(windowId); }
+      catch (err) { safeLogError('restoreWindow', err); }
+    },
+
+    recoverWindow: (windowId: number): void => {
+      try { WindowManager.getInstance().recoverWindow(windowId); }
+      catch (err) { safeLogError('recoverWindow', err); }
+    },
+
+    showWindowMethod: (windowId: number): void => {
+      try { WindowManager.getInstance().showWindowMethod(windowId); }
+      catch (err) { safeLogError('showWindowMethod', err); }
+    },
+
+    isMaximized: (windowId: number): boolean => {
+      try { return WindowManager.getInstance().isMaximized(windowId); }
+      catch (err) { safeLogError('isMaximized', err); return false; }
+    },
+
+    isMinimized: (windowId: number): boolean => {
+      try { return WindowManager.getInstance().isMinimized(windowId); }
+      catch (err) { safeLogError('isMinimized', err); return false; }
     },
 
     setWindowBlur: (windowId: number, radius: number): void => {

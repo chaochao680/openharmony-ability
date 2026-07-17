@@ -119,6 +119,7 @@ export class WindowManager {
           this.consumePendingAction();
         }
       }
+
     });
   }
 
@@ -165,17 +166,23 @@ export class WindowManager {
   // These wrappers ensure resetUserInteractionTracking() is called after operations
   // that make a window invisible (minimize/hide/close).
 
-  async minimizeWindow(windowId: number): Promise<void> {
+  minimizeWindow(windowId: number): void {
     const win = this.getWindow(windowId);
     if (!win) {
       hilog.warn(DOMAIN, 'WindowManager', 'minimizeWindow: window %{public}d not found', windowId);
       return;
     }
-    await win.minimize();
-    // Only reset tracking if the minimized window was the last interacted one
-    if (this.lastUserInteractedWindowId === windowId) {
-      this.resetUserInteractionTracking();
-    }
+    // Fire-and-forget with .catch — matches sibling ops (moveWindowTo/resizeWindow/...).
+    // The previous async/Promise-returning form leaked an unhandled rejection when the
+    // caller (ArkHelper) invoked it without awaiting.
+    win.minimize().then(() => {
+      // Only reset tracking if the minimized window was the last interacted one
+      if (this.lastUserInteractedWindowId === windowId) {
+        this.resetUserInteractionTracking();
+      }
+    }).catch((err: ESObject) => {
+      hilog.error(DOMAIN, 'WindowManager', 'minimizeWindow failed: %{public}s', JSON.stringify(err));
+    });
   }
 
   focusWindow(windowId: number): void {
@@ -202,6 +209,77 @@ export class WindowManager {
     }).catch((err: ESObject) => {
       hilog.error(DOMAIN, 'WindowManager', 'setWindowFocusable failed: %{public}s', JSON.stringify(err));
     });
+  }
+
+  // ─── Window operations (ohos-window-ops) ───
+
+  moveWindowTo(windowId: number, x: number, y: number): void {
+    const wid = Number(windowId);
+    const win = this.getWindow(wid);
+    if (!win) { return; }
+    win.moveWindowTo(x, y).catch((err: ESObject) => {
+      hilog.error(DOMAIN, 'WindowManager', 'moveWindowTo failed: %{public}s', JSON.stringify(err));
+    });
+  }
+
+  resizeWindow(windowId: number, width: number, height: number): void {
+    const wid = Number(windowId);
+    const win = this.getWindow(wid);
+    if (!win) { return; }
+    win.resize(width, height).catch((err: ESObject) => {
+      hilog.error(DOMAIN, 'WindowManager', 'resizeWindow failed: %{public}s', JSON.stringify(err));
+    });
+  }
+
+  maximizeWindow(windowId: number): void {
+    const win = this.getWindow(windowId);
+    if (!win) { hilog.warn(DOMAIN, 'WindowManager', 'maximizeWindow: window %{public}d not found', windowId); return; }
+    win.maximize(window.MaximizePresentation.EXIT_IMMERSIVE).catch((err: ESObject) => {
+      hilog.error(DOMAIN, 'WindowManager', 'maximizeWindow failed: %{public}s', JSON.stringify(err));
+    });
+  }
+
+  restoreWindow(windowId: number): void {
+    // Mirror the Rust-side API14 guard (win.restore() is API14+). The Rust path
+    // (restore_window) already guards, so this is defense-in-depth for any direct
+    // ArkTS caller; on API<14 it is a no-op+warn instead of throwing.
+    if (deviceInfo.sdkApiVersion < 14) {
+      hilog.warn(DOMAIN, 'WindowManager', 'restoreWindow: win.restore() requires API14+, current %{public}d; no-op', deviceInfo.sdkApiVersion);
+      return;
+    }
+    const win = this.getWindow(windowId);
+    if (!win) { hilog.warn(DOMAIN, 'WindowManager', 'restoreWindow: window %{public}d not found', windowId); return; }
+    win.restore().catch((err: ESObject) => {
+      hilog.error(DOMAIN, 'WindowManager', 'restoreWindow failed: %{public}s', JSON.stringify(err));
+    });
+  }
+
+  recoverWindow(windowId: number): void {
+    const win = this.getWindow(windowId);
+    if (!win) { hilog.warn(DOMAIN, 'WindowManager', 'recoverWindow: window %{public}d not found', windowId); return; }
+    win.recover().catch((err: ESObject) => {
+      hilog.error(DOMAIN, 'WindowManager', 'recoverWindow failed: %{public}s', JSON.stringify(err));
+    });
+  }
+
+  showWindowMethod(windowId: number): void {
+    const win = this.getWindow(windowId);
+    if (!win) { hilog.warn(DOMAIN, 'WindowManager', 'showWindowMethod: window %{public}d not found', windowId); return; }
+    win.showWindow().catch((err: ESObject) => {
+      hilog.error(DOMAIN, 'WindowManager', 'showWindowMethod failed: %{public}s', JSON.stringify(err));
+    });
+  }
+
+  isMaximized(windowId: number): boolean {
+    const win = this.getWindow(windowId);
+    if (!win) { return false; }
+    return win.getWindowStatus() === window.WindowStatusType.MAXIMIZE;
+  }
+
+  isMinimized(windowId: number): boolean {
+    const win = this.getWindow(windowId);
+    if (!win) { return false; }
+    return win.getWindowStatus() === window.WindowStatusType.MINIMIZE;
   }
 
   // Destroy a window and clean up all resources.
@@ -534,8 +612,13 @@ export class WindowManager {
   }
   
   getWindow(id: number): window.Window | undefined {
+    // Normalize i64→BigInt marshalling from Rust NAPI: Number() is a no-op when id
+    // arrives as a number, but fixes the main-window (id=0) lookup when id arrives as
+    // BigInt (0n === 0 is false in JS, which would silently miss the windowStage branch
+    // and the number-keyed Map). Centralizing here covers all callers.
+    const wid = Number(id);
     // Main window (id=0) is not in the windows Map, get it from windowStage
-    if (id === 0 && this.windowStage) {
+    if (wid === 0 && this.windowStage) {
       try {
         return this.windowStage.getMainWindowSync();
       } catch (e) {
@@ -543,7 +626,7 @@ export class WindowManager {
         return undefined;
       }
     }
-    const entry = this.windows.get(id);
+    const entry = this.windows.get(wid);
     return entry?.window;
   }
 

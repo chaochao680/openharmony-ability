@@ -146,8 +146,14 @@ function WebBuilder(data: WebviewNodeData) {
       controller: data.controller as web_webview.WebviewController,
       renderMode: data?.transparent ? RenderMode.SYNC_RENDER : RenderMode.ASYNC_RENDER
     })
-      .width(data.style?.width ?? "100%")
-      .height(data.style?.height ?? "100%")
+      // Use "100%" (natural ArkUI layout) instead of data.style.width/height.
+      // set_bounds (BuilderNode.update) sizes the Web node but does NOT notify the
+      // ArkWeb render engine to relayout → after window resize (release), the page
+      // keeps the old layout and the bottom is cut off. With "100%" the Web follows
+      // the Stack/window naturally on resize → ArkUI triggers ArkWeb relayout.
+      // (set_bounds still sets data.style.x/y for .position below.)
+      .width("100%")
+      .height("100%")
       .position({
         x: data.style?.x ?? 0,
         y: data.style?.y ?? 0,
@@ -281,8 +287,10 @@ function EmbeddedWebBuilder(data: WebviewNodeData) {
       controller: data.controller as web_webview.WebviewController,
       renderMode: data?.transparent ? RenderMode.SYNC_RENDER : RenderMode.ASYNC_RENDER
     })
-      .width(data.style?.width ?? "100%")
-      .height(data.style?.height ?? "100%")
+      // "100%" natural ArkUI layout (see WebBuilder) — set_bounds sizing via
+      // BuilderNode.update does not notify ArkWeb to relayout on resize.
+      .width("100%")
+      .height("100%")
       .backgroundColor(convertRRGGBBAAtoAARRGGBB(data?.style?.backgroundColor))
       .javaScriptAccess(data?.javascriptEnable)
       .domStorageAccess(true)
@@ -374,8 +382,10 @@ function EmbeddedWebBuilder(data: WebviewNodeData) {
         handleWindowNew(event, data, 'EmbeddedWebBuilder');
       })
     }
-  .width(data.style?.width ?? "100%")
-  .height(data.style?.height ?? "100%")
+  // "100%" natural ArkUI layout (see WebBuilder) — keeps .position for host-slot
+  // placement; sizing via "100%" lets the Web follow resize naturally.
+  .width("100%")
+  .height("100%")
   .position({
     x: data.style?.x ?? 0,
     y: data.style?.y ?? 0,

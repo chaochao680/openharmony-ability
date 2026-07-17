@@ -159,11 +159,10 @@ export class PredefinedActionExecutor {
       return;
     }
 
-    try {
-      await WindowManager.getInstance().minimizeWindow(windowId);
-    } catch (e) {
-      hilog.warn(DOMAIN, 'Menu', 'minimizeWindow failed: %{public}s', String(e));
-    }
+    // WindowManager.minimizeWindow is fire-and-forget (void + internal .catch),
+    // so no await/try-catch here — awaiting a void would resolve immediately and
+    // mask the async failure path that is now handled inside WindowManager.
+    WindowManager.getInstance().minimizeWindow(windowId);
   }
 
   /**
