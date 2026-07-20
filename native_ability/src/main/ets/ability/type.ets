@@ -137,6 +137,15 @@ export interface ArkHelper {
   setWindowBackgroundColor: (windowId: number, color: number) => void;
   focusWindow: (windowId: number) => void;
   setWindowFocusable: (windowId: number, focusable: boolean) => void;
+  moveWindowTo: (windowId: number, x: number, y: number) => void;
+  resizeWindow: (windowId: number, width: number, height: number) => void;
+  maximizeWindow: (windowId: number) => void;
+  minimizeWindow: (windowId: number) => void;
+  restoreWindow: (windowId: number) => void;
+  recoverWindow: (windowId: number) => void;
+  showWindowMethod: (windowId: number) => void;
+  isMaximized: (windowId: number) => boolean;
+  isMinimized: (windowId: number) => boolean;
   setWindowBlur: (windowId: number, radius: number) => void;
   loadUrl: (id: number, url: string) => void;
   createMenu?: (options: MenuCreateOptions) => Promise<string>;

@@ -55,7 +55,8 @@ export class WindowOpsExecutor implements WindowOps {
 
   async minimize(): Promise<void> {
     if (!this.win) throw new Error('Window not set');
-    await WindowManager.getInstance().minimizeWindow(this.windowId);
+    // WindowManager.minimizeWindow is fire-and-forget (void + internal .catch).
+    WindowManager.getInstance().minimizeWindow(this.windowId);
   }
 
   async maximize(): Promise<void> {

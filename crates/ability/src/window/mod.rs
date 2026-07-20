@@ -303,3 +303,158 @@ pub fn set_window_focusable(window_id: i64, focusable: bool) -> napi_ohos::Resul
     }
     Err(Error::from_reason("Helper or Env not initialized"))
 }
+
+// ============================================================================
+// Window operations (ohos-window-ops)
+// Fire-and-forget (dispatch async Promise, return Ok(()) immediately),
+// mirroring focus_window. is_window_maximized/is_window_minimized are
+// synchronous queries returning bool via getWindowStatus().
+// ============================================================================
+
+/// Moves a window to (x, y) via ArkTS `moveWindowTo(windowId, x, y)` → `win.moveWindowTo(x, y)`.
+pub fn move_window_to(window_id: i64, x: i64, y: i64) -> napi_ohos::Result<()> {
+    let ret = unsafe { get_helper() };
+    if let Some(h) = ret.borrow().as_ref() {
+        if let Some(env) = get_main_thread_env().borrow().as_ref() {
+            let obj = h.get_value(env).map_err(|e| { crate::error!("Failed to get helper: {:?}", e); e })?;
+            let func = obj.get_named_property::<Function<'_, Object, ()>>("moveWindowTo")?;
+            let mut params = Object::new(env)?;
+            params.set("windowId", window_id)?;
+            params.set("x", x)?;
+            params.set("y", y)?;
+            func.call(params)?;
+            return Ok(());
+        } else { crate::error!("Main thread env not available"); }
+    } else { crate::error!("Helper object not initialized"); }
+    Err(Error::from_reason("Helper or Env not initialized"))
+}
+
+/// Resizes a window via ArkTS `resizeWindow(windowId, w, h)` → `win.resize(w, h)`.
+pub fn resize_window(window_id: i64, width: i64, height: i64) -> napi_ohos::Result<()> {
+    let ret = unsafe { get_helper() };
+    if let Some(h) = ret.borrow().as_ref() {
+        if let Some(env) = get_main_thread_env().borrow().as_ref() {
+            let obj = h.get_value(env).map_err(|e| { crate::error!("Failed to get helper: {:?}", e); e })?;
+            let func = obj.get_named_property::<Function<'_, Object, ()>>("resizeWindow")?;
+            let mut params = Object::new(env)?;
+            params.set("windowId", window_id)?;
+            params.set("width", width)?;
+            params.set("height", height)?;
+            func.call(params)?;
+            return Ok(());
+        } else { crate::error!("Main thread env not available"); }
+    } else { crate::error!("Helper object not initialized"); }
+    Err(Error::from_reason("Helper or Env not initialized"))
+}
+
+/// Minimizes a window via ArkTS `minimizeWindow(windowId)` → `win.minimize()`.
+pub fn minimize_window(window_id: i64) -> napi_ohos::Result<()> {
+    let ret = unsafe { get_helper() };
+    if let Some(h) = ret.borrow().as_ref() {
+        if let Some(env) = get_main_thread_env().borrow().as_ref() {
+            let obj = h.get_value(env).map_err(|e| { crate::error!("Failed to get helper: {:?}", e); e })?;
+            let func = obj.get_named_property::<Function<'_, i64, ()>>("minimizeWindow")?;
+            func.call(window_id)?;
+            return Ok(());
+        } else { crate::error!("Main thread env not available"); }
+    } else { crate::error!("Helper object not initialized"); }
+    Err(Error::from_reason("Helper or Env not initialized"))
+}
+
+/// Maximizes a window via ArkTS `maximizeWindow(windowId)` → `win.maximize(MaximizePresentation.EXIT_IMMERSIVE)`.
+/// EXIT_IMMERSIVE yields a true MAXIMIZE state (default ENTER_IMMERSIVE enters FULL_SCREEN).
+pub fn maximize_window(window_id: i64) -> napi_ohos::Result<()> {
+    let ret = unsafe { get_helper() };
+    if let Some(h) = ret.borrow().as_ref() {
+        if let Some(env) = get_main_thread_env().borrow().as_ref() {
+            let obj = h.get_value(env).map_err(|e| { crate::error!("Failed to get helper: {:?}", e); e })?;
+            let func = obj.get_named_property::<Function<'_, i64, ()>>("maximizeWindow")?;
+            func.call(window_id)?;
+            return Ok(());
+        } else { crate::error!("Main thread env not available"); }
+    } else { crate::error!("Helper object not initialized"); }
+    Err(Error::from_reason("Helper or Env not initialized"))
+}
+
+/// Restores a window from minimized state via ArkTS `restoreWindow(windowId)` → `win.restore()`.
+/// API14+ only (restore is API14). On API < 14, no-op + warn.
+/// Note: restore() only restores from MINIMIZE, NOT from MAXIMIZE.
+pub fn restore_window(window_id: i64) -> napi_ohos::Result<()> {
+    if crate::version::sdk_api_version() < 14 {
+        log::warn!(
+            "[ohos-window] restore() requires API14+, current API {}; no-op",
+            crate::version::sdk_api_version()
+        );
+        return Ok(());
+    }
+    let ret = unsafe { get_helper() };
+    if let Some(h) = ret.borrow().as_ref() {
+        if let Some(env) = get_main_thread_env().borrow().as_ref() {
+            let obj = h.get_value(env).map_err(|e| { crate::error!("Failed to get helper: {:?}", e); e })?;
+            let func = obj.get_named_property::<Function<'_, i64, ()>>("restoreWindow")?;
+            func.call(window_id)?;
+            return Ok(());
+        } else { crate::error!("Main thread env not available"); }
+    } else { crate::error!("Helper object not initialized"); }
+    Err(Error::from_reason("Helper or Env not initialized"))
+}
+
+/// Recovers a window from maximized/fullscreen to floating via ArkTS `recoverWindow(windowId)` → `win.recover()`.
+/// API 7+, public. Switches MAXIMIZE/FULL_SCREEN → FLOATING, restoring previous size/position.
+pub fn recover_window(window_id: i64) -> napi_ohos::Result<()> {
+    let ret = unsafe { get_helper() };
+    if let Some(h) = ret.borrow().as_ref() {
+        if let Some(env) = get_main_thread_env().borrow().as_ref() {
+            let obj = h.get_value(env).map_err(|e| { crate::error!("Failed to get helper: {:?}", e); e })?;
+            let func = obj.get_named_property::<Function<'_, i64, ()>>("recoverWindow")?;
+            func.call(window_id)?;
+            return Ok(());
+        } else { crate::error!("Main thread env not available"); }
+    } else { crate::error!("Helper object not initialized"); }
+    Err(Error::from_reason("Helper or Env not initialized"))
+}
+
+/// Shows a window via ArkTS `showWindowMethod(windowId)` → `win.showWindow()`.
+/// Note: showWindow only restores hidden subwindows, not minimized main windows.
+pub fn show_window(window_id: i64) -> napi_ohos::Result<()> {
+    let ret = unsafe { get_helper() };
+    if let Some(h) = ret.borrow().as_ref() {
+        if let Some(env) = get_main_thread_env().borrow().as_ref() {
+            let obj = h.get_value(env).map_err(|e| { crate::error!("Failed to get helper: {:?}", e); e })?;
+            let func = obj.get_named_property::<Function<'_, i64, ()>>("showWindowMethod")?;
+            func.call(window_id)?;
+            return Ok(());
+        } else { crate::error!("Main thread env not available"); }
+    } else { crate::error!("Helper object not initialized"); }
+    Err(Error::from_reason("Helper or Env not initialized"))
+}
+
+/// Queries whether a window is maximized via ArkTS `isMaximized(windowId)` →
+/// `win.getWindowStatus() === window.WindowStatusType.MAXIMIZE`.
+/// Synchronous (getWindowStatus is a sync getter, API12).
+pub fn is_window_maximized(window_id: i64) -> napi_ohos::Result<bool> {
+    let ret = unsafe { get_helper() };
+    if let Some(h) = ret.borrow().as_ref() {
+        if let Some(env) = get_main_thread_env().borrow().as_ref() {
+            let obj = h.get_value(env).map_err(|e| { crate::error!("Failed to get helper: {:?}", e); e })?;
+            let func = obj.get_named_property::<Function<'_, i64, bool>>("isMaximized")?;
+            return func.call(window_id);
+        } else { crate::error!("Main thread env not available"); }
+    } else { crate::error!("Helper object not initialized"); }
+    Err(Error::from_reason("Helper or Env not initialized"))
+}
+
+/// Queries whether a window is minimized via ArkTS `isMinimized(windowId)` →
+/// `win.getWindowStatus() === window.WindowStatusType.MINIMIZE`.
+/// Synchronous (getWindowStatus is a sync getter, API12).
+pub fn is_window_minimized(window_id: i64) -> napi_ohos::Result<bool> {
+    let ret = unsafe { get_helper() };
+    if let Some(h) = ret.borrow().as_ref() {
+        if let Some(env) = get_main_thread_env().borrow().as_ref() {
+            let obj = h.get_value(env).map_err(|e| { crate::error!("Failed to get helper: {:?}", e); e })?;
+            let func = obj.get_named_property::<Function<'_, i64, bool>>("isMinimized")?;
+            return func.call(window_id);
+        } else { crate::error!("Main thread env not available"); }
+    } else { crate::error!("Helper object not initialized"); }
+    Err(Error::from_reason("Helper or Env not initialized"))
+}
