@@ -170,6 +170,8 @@ export interface ArkHelper {
   autostartEnable: () => Promise<void>;
   autostartDisable: () => Promise<void>;
   autostartIsEnabled: () => Promise<boolean>;
+  openWithSystem: (uri: string) => Promise<void>;
+  revealInDir: (dirUri: string) => Promise<void>;
   registerHotkey: (jsonStr: string) => void;
   unregisterHotkey: (id: number) => void;
   unregisterAllHotkeys: () => void;

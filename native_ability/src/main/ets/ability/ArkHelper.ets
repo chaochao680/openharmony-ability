@@ -803,6 +803,29 @@ export function createArkHelper(): ArkHelper {
       }
     },
 
+    openWithSystem: async (uri: string): Promise<void> => {
+      const context = getUIAbilityContext();
+      if (!context) {
+        throw new Error('UIAbilityContext not available');
+      }
+      await context.startAbility({
+        action: 'ohos.want.action.viewData',
+        uri: uri,
+        entities: ['entity.system.browsable'],
+      });
+    },
+
+    revealInDir: async (dirUri: string): Promise<void> => {
+      const context = getUIAbilityContext();
+      if (!context) {
+        throw new Error('UIAbilityContext not available');
+      }
+      await context.startAbility({
+        action: 'ohos.want.action.viewData',
+        uri: dirUri,
+      });
+    },
+
     registerHotkey: (jsonStr: string): void => {
       registerHotkey(jsonStr);
     },

@@ -18,7 +18,7 @@ use napi_ohos::{
     Error, Result,
 };
 use ohos_arkui_binding::XComponent;
-use ohos_display_binding::default_display_scaled_density;
+use ohos_display_binding::{default_display_height, default_display_scaled_density, default_display_width};
 use ohos_ime_binding::IME;
 use ohos_xcomponent_binding::RawWindow;
 
@@ -229,6 +229,20 @@ impl OpenHarmonyAppInner {
 
     pub fn scale(&self) -> f32 {
         default_display_scaled_density()
+    }
+
+    /// Physical dimensions of the default display, in pixels.
+    ///
+    /// This is the real screen size — as opposed to `content_rect()`/`window_rect()`,
+    /// which return the *window's own* rect. Consumers that need the screen size
+    /// (e.g. tao's `MonitorHandle::size()` for window centering) must use this,
+    /// otherwise computations like positioner `Center` collapse to ~(0,0) because
+    /// the window rect is smaller than itself.
+    pub fn display_size(&self) -> (u32, u32) {
+        (
+            default_display_width().max(0) as u32,
+            default_display_height().max(0) as u32,
+        )
     }
 
     pub fn init_context(&self) -> AbilityInitContext {
@@ -538,6 +552,12 @@ impl OpenHarmonyApp {
     /// Get current app scale
     pub fn scale(&self) -> f32 {
         self.inner.read().unwrap().scale()
+    }
+
+    /// Physical dimensions of the default display, in pixels (real screen size,
+    /// not the window's own rect). See `OpenHarmonyAppInner::display_size`.
+    pub fn display_size(&self) -> (u32, u32) {
+        self.inner.read().unwrap().display_size()
     }
 
 /// Exit current app with code
