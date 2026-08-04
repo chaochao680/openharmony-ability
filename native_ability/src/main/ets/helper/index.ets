@@ -1,5 +1,7 @@
 export * from "./os";
 
+export * from "./account";
+
 export * from "./updater";
 
 export * from "./random";

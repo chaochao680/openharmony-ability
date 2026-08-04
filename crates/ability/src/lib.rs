@@ -18,6 +18,9 @@ mod waker;
 #[cfg(feature = "statusbar")]
 pub mod statusbar;
 
+#[cfg(feature = "account")]
+mod account;
+
 #[cfg(feature = "updater")]
 mod updater;
 
@@ -107,6 +110,9 @@ pub use waker::*;
 
 #[cfg(feature = "statusbar")]
 pub use statusbar::*;
+
+#[cfg(feature = "account")]
+pub use account::*;
 
 #[cfg(feature = "updater")]
 pub use updater::*;

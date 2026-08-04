@@ -11,7 +11,7 @@ import {
   WindowAvoidAreaInfo,
   WindowConfig,
 } from "../ability/type";
-import { exit, restart, check as updaterCheckFn, showUpdateDialog as updaterShowDialogFn, downloadAndInstall as updaterDownloadAndInstallFn, objectAssign, writeImageToClipboard, openAutostartSettings, getAutostartStatus, registerHotkey, unregisterHotkey, unregisterAllHotkeys } from "../helper";
+import { exit, restart, check as updaterCheckFn, showUpdateDialog as updaterShowDialogFn, downloadAndInstall as updaterDownloadAndInstallFn, login as accountLoginFn, silentLogin as accountSilentLoginFn, logout as accountLogoutFn, objectAssign, writeImageToClipboard, openAutostartSettings, getAutostartStatus, registerHotkey, unregisterHotkey, unregisterAllHotkeys } from "../helper";
 import { requestPermission } from "../helper/permission";
 import { getPredefinedActionExecutor } from "../helper/menu";
 import { PredefinedType } from "../helper/menu_types";
@@ -81,7 +81,10 @@ export function createArkHelper(): ArkHelper {
         return uiCtx.getHostContext() as common.UIAbilityContext;
       }
     } catch (e) {
-      hilog.error(DOMAIN, 'ArkHelper', 'Failed to get UIAbilityContext: %{public}s', JSON.stringify(e));
+      // NAPI-reentrant path (called before first await in accountLogin/silentLogin):
+      // use safeLogError, not hilog.error, which can throw 'Argc mismatch' here
+      // and mask the original failure (ohos-constraints 2.3).
+      safeLogError('getUIAbilityContext', e);
     }
     return null;
   };
@@ -128,6 +131,51 @@ export function createArkHelper(): ArkHelper {
         await updaterDownloadAndInstallFn(context);
       } catch (err) {
         hilog.error(DOMAIN, 'ArkHelper', 'updaterDownloadAndInstall failed: %{public}s', JSON.stringify(err));
+        throw err;
+      }
+    },
+
+    // ─── Huawei account (no context needed — Account Kit has no per-app state) ───
+    // Errors are normalized to "<code>:<message>" strings in account.ets and
+    // propagated to Rust; safeLogError is used because the entry path is NAPI-reentrant.
+
+    accountLogin: async (): Promise<Object> => {
+      try {
+        // One-tap login (createLoginWithHuaweiIDRequest, forceLogin=true).
+        // A UIAbilityContext is required: the no-arg AuthenticationController
+        // throws "Incorrect context parameter type" when forceLogin=true needs
+        // to host the login UI (device-verified 2026-08-03). When the account
+        // is already logged in & authorized, Account Kit returns the credential
+        // without showing the UI.
+        const context = getUIAbilityContext();
+        if (!context) {
+          throw new Error('UIAbilityContext not available');
+        }
+        return await accountLoginFn(context);
+      } catch (err) {
+        safeLogError('accountLogin', err);
+        throw err;
+      }
+    },
+
+    accountSilentLogin: async (): Promise<Object> => {
+      try {
+        const context = getUIAbilityContext();
+        if (!context) {
+          throw new Error('UIAbilityContext not available');
+        }
+        return await accountSilentLoginFn(context);
+      } catch (err) {
+        safeLogError('accountSilentLogin', err);
+        throw err;
+      }
+    },
+
+    accountLogout: async (): Promise<void> => {
+      try {
+        await accountLogoutFn();
+      } catch (err) {
+        safeLogError('accountLogout', err);
         throw err;
       }
     },

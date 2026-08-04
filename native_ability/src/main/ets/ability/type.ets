@@ -122,12 +122,30 @@ export interface WindowConfig {
   backgroundColor?: number;  // Phase 3: window background color in 0xAARRGGBB format
 }
 
+/**
+ * Huawei account info returned by Account Kit login (canonical camelCase keys,
+ * read by Rust `parse_account_info`). `accessToken` is only present in some
+ * scenarios; other fields are empty strings when Account Kit omits them.
+ */
+export interface AccountInfo {
+  uid: string;
+  openId: string;
+  unionId: string;
+  displayName: string;
+  avatarUri: string;
+  authorizationCode: string;
+  accessToken: string | null;
+}
+
 export interface ArkHelper {
   exit: (code: number) => void;
   restart: () => number;
   updaterCheck: () => Promise<Object>;
   updaterShowDialog: () => Promise<number>;
   updaterDownloadAndInstall: () => Promise<void>;
+  accountLogin: () => Promise<Object>;
+  accountSilentLogin: () => Promise<Object>;
+  accountLogout: () => Promise<void>;
   createWebview: (data: WebViewInitData) => Object;
   createEmbeddedWebview: (data: WebViewInitData) => Object;
   requestPermission: (permission: string | string[]) => Promise<number | number[]>;

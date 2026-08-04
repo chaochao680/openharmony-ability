@@ -8,6 +8,7 @@ description = "Binding Rust application on Harmony with Ability"
 [features]
 default = ["log", "updater", "window"]
 drag_and_drop = []
+account = []
 webview = ["dep:ohos-web-binding", "dep:http"]
 menu = []
 clipboard = ["log"]
