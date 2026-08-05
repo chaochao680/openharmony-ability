@@ -3,6 +3,7 @@ use std::{cell::RefCell, mem::ManuallyDrop, rc::Rc};
 use napi_ohos::{bindgen_prelude::ObjectRef, Env};
 
 mod autostart;
+mod opener;
 mod permission;
 mod restart;
 #[cfg(feature = "updater")]
@@ -12,6 +13,7 @@ mod webview;
 mod window_info;
 
 pub use autostart::*;
+pub use opener::*;
 pub use permission::*;
 pub use restart::*;
 #[cfg(feature = "updater")]

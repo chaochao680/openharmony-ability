@@ -5,7 +5,8 @@ use ohos_ime_binding::IME;
 
 use crate::{
     create_autostart_disable_tsfn, create_autostart_enable_tsfn, create_autostart_is_enabled_tsfn,
-    create_permission_request_tsfn, create_restart_tsfn,
+    create_open_with_system_tsfn, create_permission_request_tsfn, create_reveal_in_dir_tsfn,
+    create_restart_tsfn,
     input, input::set_mouse_event_callback, set_helper,
     set_main_thread_env, Event, InputEvent, IntervalInfo, OpenHarmonyApp, Rect, Size,
 };
@@ -61,6 +62,14 @@ pub fn render(
     }
     if let Err(e) = create_autostart_is_enabled_tsfn(env) {
         crate::error!("create_autostart_is_enabled_tsfn failed: {}", e);
+    }
+
+    // Initialize opener threadsafe functions
+    if let Err(e) = create_open_with_system_tsfn(env) {
+        crate::error!("create_open_with_system_tsfn failed: {}", e);
+    }
+    if let Err(e) = create_reveal_in_dir_tsfn(env) {
+        crate::error!("create_reveal_in_dir_tsfn failed: {}", e);
     }
 
     let mut root = RootNode::new(slot);
