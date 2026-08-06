@@ -53,6 +53,20 @@ pub fn render(
         let _ = crate::create_updater_download_and_install_tsfn(env);
     }
 
+    // Initialize Huawei account threadsafe functions (must be called after set_main_thread_env)
+    #[cfg(feature = "account")]
+    {
+        if let Err(e) = crate::create_account_login_tsfn(env) {
+            crate::error!("init account_login_tsfn failed: {}", e);
+        }
+        if let Err(e) = crate::create_account_silent_login_tsfn(env) {
+            crate::error!("init account_silent_login_tsfn failed: {}", e);
+        }
+        if let Err(e) = crate::create_account_logout_tsfn(env) {
+            crate::error!("init account_logout_tsfn failed: {}", e);
+        }
+    }
+
     // Initialize autostart threadsafe functions
     if let Err(e) = create_autostart_enable_tsfn(env) {
         crate::error!("create_autostart_enable_tsfn failed: {}", e);

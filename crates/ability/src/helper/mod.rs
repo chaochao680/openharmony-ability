@@ -4,6 +4,8 @@ use napi_ohos::{bindgen_prelude::ObjectRef, Env};
 
 mod autostart;
 mod opener;
+#[cfg(feature = "account")]
+mod account;
 mod permission;
 mod restart;
 #[cfg(feature = "updater")]
@@ -14,6 +16,8 @@ mod window_info;
 
 pub use autostart::*;
 pub use opener::*;
+#[cfg(feature = "account")]
+pub use account::*;
 pub use permission::*;
 pub use restart::*;
 #[cfg(feature = "updater")]
