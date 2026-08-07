@@ -410,6 +410,9 @@ export class WindowManager {
 
   // hide: UIAbility main window uses hideAbility; Float sub-window uses minimize
   // (OHOS has no standalone hideWindow API).
+  // TODO(遗留问题三): hideAbility 仅 UIAbility 可用且需状态栏前置条件;Float 用 minimize
+  //   冒充(语义不符,is_minimized 误报 true);show/hide 不对称(主窗口 hide 后 show 无法恢复)。
+  //   详见 doc/OHOS窗口遗留问题.md(问题三)。
   hideWindow(windowId: number): void {
     if (this.isUIAbilityMainWindow(windowId)) {
       this.hideAbility();
