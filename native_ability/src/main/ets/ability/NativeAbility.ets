@@ -6,14 +6,14 @@ import { hilog } from '@kit.PerformanceAnalysisKit';
 import { deviceInfo } from '@kit.BasicServicesKit';
 import { RouteName } from "../components/MainPage";
 import { setMenuClickHandler, setMenuBarRecoverFn, getMenuDataCallback } from "../components/MenuBarComponent";
-import { AbilityInitContext, ApplicationLifecycle, Module } from "./type";
-import { Loadable } from "../helper/loadable";
+import { ApplicationLifecycle, Module } from "./type";
 import { MenuManager, PredefinedActionExecutor, setPredefinedActionExecutor } from "../helper/menu";
 import { AboutMetadataData } from "../helper/menu_types";
 import { setCurrentAbilityName } from "../helper/StatusBarUtils";
 import { WindowManager } from "../window/WindowManager";
 import { DOMAIN } from '../helper/constants';
 import { setPrimaryWebviewControllerCallback } from "../components/DefaultXComponent";
+import { ProcessInitializer } from "./ProcessInitializer";
 
 export const STATE_KEY = "ohos.rs.ability.application.state";
 
@@ -22,20 +22,14 @@ export class NativeAbility extends UIAbility {
   public defaultPage: boolean = true;
   public mode: "xcomponent" | "webview" = "xcomponent";
   public loadMode: "async" | "sync" = "async";
-  private nativeModules: Module[] = [];
-  private lifecycles: ApplicationLifecycle[] = [];
-  private loadedModuleNames: string[] = [];
-
-  protected resolveModuleNames(): string[] {
-    const moduleNames = Loadable.resolveModuleNames(this.moduleName);
-    if (moduleNames.length === 0) {
-      throw new Error("moduleName must contain at least one module");
-    }
-    return moduleNames;
-  }
+  // The Want that launched this instance. Saved in onCreate so onWindowStageCreate
+  // can read want.parameters.tauri_window_id (windowId for subsequent instances).
+  // Named appLaunchWant to avoid colliding with UIAbility base class members.
+  private appLaunchWant: Want | null = null;
 
   protected forEachLifecycle(handler: (lifecycle: ApplicationLifecycle) => void): void {
-    for (const lifecycle of this.lifecycles) {
+    const lifecycles = ProcessInitializer.getLifecycles();
+    for (const lifecycle of lifecycles) {
       try {
         handler(lifecycle);
       } catch (e) {
@@ -44,101 +38,22 @@ export class NativeAbility extends UIAbility {
     }
   }
 
-  protected parseSavedStateMap(rawState: string): Record<string, string> {
-    if (!rawState) {
-      return {};
-    }
-
-    try {
-      const parsed = JSON.parse(rawState) as Record<string, Object>;
-      const mapped: Record<string, string> = {};
-      const keys = Object.keys(parsed);
-      for (const key of keys) {
-        const value = parsed[key];
-        mapped[key] = typeof value === "string" ? value : String(value);
-      }
-      return mapped;
-    } catch (e) {
-      hilog.warn(DOMAIN, 'NativeAbility', 'State map parse failed: %{public}s', String(e));
-      return {};
-    }
-  }
-
-  protected createInitContext(moduleName: string): AbilityInitContext {
-    const context = this.context as common.UIAbilityContext;
-    return {
-      basePath: context?.filesDir ?? "",
-      prefPath: context?.filesDir ?? "",
-      preferredLocales: context?.config?.language ?? "",
-      moduleName,
-      resourceManager: context?.resourceManager,
-      sdkApiVersion: deviceInfo.sdkApiVersion,
-      distributionOSApiVersion: deviceInfo.distributionOSApiVersion,
-    };
-  }
-
   async onCreate(want: Want, launchParam: AbilityConstant.LaunchParam): Promise<void> {
     setCurrentAbilityName(want.abilityName ?? "");
-
-    const isRestore: boolean =
-      (want.parameters?.["ohos.ability.params.abilityRecoveryRestart"] as boolean) ?? false;
-    const state = isRestore ? ((want.parameters?.[STATE_KEY] as string) ?? "") : "";
+    this.appLaunchWant = want;
 
     hilog.info(DOMAIN, 'NativeAbility', 'onCreate - moduleName: %{public}s', JSON.stringify(this.moduleName));
     AppStorage.setOrCreate("moduleName", this.moduleName);
     AppStorage.setOrCreate("loadMode", this.loadMode);
 
-    // Initialize WindowManager for multi-window support
+    // Process-level initialization (runs only once; subsequent instances skip it)
     const context = this.context as common.UIAbilityContext;
-    WindowManager.init(context);
-
-    const requestedModules: string[] = this.resolveModuleNames();
-    const restoredStateMap: Record<string, string> = this.parseSavedStateMap(state);
-    let webEngineRequired = false;
-
-    this.nativeModules = [];
-    this.lifecycles = [];
-    this.loadedModuleNames = [];
-
-    for (const moduleName of requestedModules) {
-      const module: Module = await Loadable.load(moduleName, this.loadMode);
-      this.nativeModules.push(module);
-      this.loadedModuleNames.push(moduleName);
-
-      if (typeof module.registerCustomProtocol === "function") {
-        module.registerCustomProtocol();
-        webEngineRequired = true;
-      }
-    }
-
-    if (webEngineRequired) {
-      webview.WebviewController.initializeWebEngine();
-    }
-
-    for (let i = 0; i < this.nativeModules.length; i++) {
-      const module: Module = this.nativeModules[i];
-      const moduleName: string = this.loadedModuleNames[i];
-      const lifecycle: ApplicationLifecycle = module.init(this.createInitContext(moduleName));
-
-      this.lifecycles.push(lifecycle);
-
-      const restoredState = restoredStateMap[moduleName] ?? state;
-      try {
-        lifecycle.windowStageEventCallback.onAbilityCreate(restoredState);
-      } catch (e) {
-        hilog.error(DOMAIN, 'NativeAbility', 'onAbilityCreate failed: %{public}s', String(e));
-      }
-      try {
-        hilog.info(DOMAIN, 'NativeAbility', 'onAbilityCreateWithWant want.uri: %{public}s', want.uri ?? '');
-        lifecycle.windowStageEventCallback.onAbilityCreateWithWant?.({ uri: want.uri ?? '' });
-      } catch (e) {
-        hilog.error(DOMAIN, 'NativeAbility', 'onAbilityCreateWithWant failed: %{public}s', String(e));
-      }
-    }
+    await ProcessInitializer.initialize(context, this.moduleName, this.loadMode, want);
   }
 
   private setupMenuPopup(windowStage: window.WindowStage): void {
-    const primaryModule: ESObject = this.nativeModules[0] as ESObject;
+    const nativeModules = ProcessInitializer.getNativeModules();
+    const primaryModule: ESObject = nativeModules[0] as ESObject;
     if (!primaryModule || typeof primaryModule.onMenuRequest !== 'function') {
       return;
     }
@@ -235,8 +150,12 @@ export class NativeAbility extends UIAbility {
   async onWindowStageCreate(windowStage: window.WindowStage): Promise<void> {
     this.forEachLifecycle((lifecycle) => lifecycle.windowStageEventCallback.onWindowStageCreate());
 
-    // Pass windowStage to WindowManager for createSubWindow support
-    WindowManager.getInstance().setWindowStage(windowStage);
+    // All UIAbility instances are equal — unified registration.
+    // windowId from want (subsequent instances) or 0 (first instance).
+    const windowId = this.readWindowId();
+    const transparent = this.readTransparent();
+    WindowManager.getInstance().registerUIAbilityStage(windowId, windowStage, this.context, transparent);
+    hilog.info(DOMAIN, 'NativeAbility', 'onWindowStageCreate: windowId=%{public}d transparent=%{public}s', windowId, String(transparent));
 
     try {
       windowStage.on("windowStageEvent", (event: window.WindowStageEventType) => {
@@ -289,11 +208,26 @@ export class NativeAbility extends UIAbility {
 
     if (this.defaultPage) {
       try {
-        await windowStage.loadContentByName(RouteName);
+        // Subsequent instances (windowId > 0): pass windowId via LocalStorage so
+        // MainPage's DefaultXComponent reads the correct id. First instance
+        // (windowId=0): no LocalStorage needed (default 0).
+        if (windowId > 0) {
+          let storage = new LocalStorage();
+          storage.setOrCreate('windowId', windowId);
+          await windowStage.loadContentByName(RouteName, storage);
+          hilog.info(DOMAIN, 'NativeAbility', 'loadContentByName with windowId=%{public}d', windowId);
+        } else {
+          await windowStage.loadContentByName(RouteName);
+        }
       } catch (e) {
         hilog.error(DOMAIN, 'NativeAbility', 'loadContentByName failed: %{public}s', String(e));
       }
     }
+
+    // Transparent window background/container color is applied in
+    // DefaultXComponent.aboutToAppear (window fully ready there). The transparent
+    // flag is stored in WindowManager.registerUIAbilityStage and applied via
+    // WindowManager.applyTransparentBackground(windowId) in aboutToAppear.
 
     try {
       this.setupMenuPopup(windowStage);
@@ -305,10 +239,38 @@ export class NativeAbility extends UIAbility {
   onWindowStageDestroy(): void | Promise<void> {
     this.forEachLifecycle((lifecycle) => lifecycle.windowStageEventCallback.onWindowStageDestroy());
     try {
-      WindowManager.getInstance().removeWindow(0);
+      const windowId = this.readWindowId();
+      WindowManager.getInstance().unregisterUIAbilityStage(windowId);
     } catch (e) {
       hilog.error(DOMAIN, 'NativeAbility', 'onWindowStageDestroy cleanup failed: %{public}s', String(e));
     }
+  }
+
+  // Reads windowId from want.parameters.tauri_window_id.
+  // Returns 0 (first instance, no want param) or >0 (subsequent instances).
+  private readWindowId(): number {
+    if (!this.appLaunchWant || !this.appLaunchWant.parameters) {
+      return 0;
+    }
+    const raw = this.appLaunchWant.parameters['tauri_window_id'];
+    if (raw === undefined || raw === null) {
+      return 0;
+    }
+    const id = Number(raw);
+    return Number.isFinite(id) ? id : 0;
+  }
+
+  // Reads transparent flag from want.parameters.tauri_transparent.
+  // Returns false (default opaque) for first instance or when param absent.
+  private readTransparent(): boolean {
+    if (!this.appLaunchWant || !this.appLaunchWant.parameters) {
+      return false;
+    }
+    const raw = this.appLaunchWant.parameters['tauri_transparent'];
+    if (raw === undefined || raw === null) {
+      return false;
+    }
+    return String(raw) === 'true';
   }
 
   onMemoryLevel(level: AbilityConstant.MemoryLevel): void {
@@ -352,9 +314,11 @@ export class NativeAbility extends UIAbility {
   ): AbilityConstant.OnSaveResult {
     const stateMap: Record<string, string> = {};
 
-    for (let i = 0; i < this.lifecycles.length; i++) {
-      const lifecycle = this.lifecycles[i];
-      const moduleName = this.loadedModuleNames[i];
+    const lifecycles = ProcessInitializer.getLifecycles();
+    const loadedModuleNames = ProcessInitializer.getLoadedModuleNames();
+    for (let i = 0; i < lifecycles.length; i++) {
+      const lifecycle = lifecycles[i];
+      const moduleName = loadedModuleNames[i];
       if (!moduleName) {
         continue;
       }

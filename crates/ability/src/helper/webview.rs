@@ -362,7 +362,7 @@ impl Webview {
     }
 
     pub fn set_background_color(&self, color: u32) -> Result<()> {
-        crate::debug!(
+        crate::info!(
             "[openharmony-ability] set_background_color(0x{:08X})",
             color
         );

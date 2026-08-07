@@ -7,6 +7,7 @@ import { image } from "@kit.ImageKit";
 import {
   ArkHelper,
   StatusBarIconRgba,
+  UIAbilityWantParams,
   WebViewInitData as NativeWebViewInitData,
   WindowAvoidAreaInfo,
   WindowConfig,
@@ -44,7 +45,7 @@ import {
   helperRef,
   reRegisterStatusBarClickHandlers,
 } from "../helper/StatusBarUtils";
-import { ConfigurationConstant } from '@kit.AbilityKit';
+import { ConfigurationConstant, Want } from '@kit.AbilityKit';
 import { primaryWebviewControllerCallback, clearPrimaryWebviewControllerCallback } from "../components/DefaultXComponent";
 import { DOMAIN, NATIVE_MODULE_STORAGE_KEY } from '../helper/constants';
 
@@ -324,7 +325,10 @@ export function createArkHelper(): ArkHelper {
         init.style = init.style || {};
         // OHOS: Set WebView transparent only when requested.
         // The Web component only respects .backgroundColor() at creation, not at runtime.
-        // Window shell transparency is controlled separately by setWindowBackgroundColor().
+        // Window shell transparency (setWindowContainerColor) is applied in
+        // NativeAbility.onWindowStageCreate after loadContentByName — that's when
+        // the window is fully ready. Calling here or in registerUIAbilityStage is
+        // too early ("window state is abnormal").
         if (data?.transparent) {
           init.transparent = true;
           init.style.backgroundColor = Color.Transparent;
@@ -503,6 +507,46 @@ export function createArkHelper(): ArkHelper {
       }
     },
 
+    // Start a new EntryAbility instance (multi-UIAbility-instance path).
+    // Rust calls this via NAPI (start_ui_ability) with a want object carrying
+    // abilityName + pre-allocated windowId + label + url + multiton flag.
+    // Uses WindowManager's UIAbilityContext to call context.startAbility directly.
+    // Requires launchType: "standard" in module.json5 for the new instance to be created.
+    startUIAbility: (want: UIAbilityWantParams): void => {
+      try {
+        hilog.info(DOMAIN, 'ArkHelper', 'startUIAbility: %{public}s', JSON.stringify(want));
+        const context = WindowManager.getInstance().getContext();
+        // OHOS ArkTS requires parameters to be a Record<string, Object> declared
+        // as a separate variable — an inline object literal is inferred as a
+        // different type and AMS drops the custom keys. Match demo3's pattern.
+        let params: Record<string, Object> = {
+          'tauri_window_id': String(want.windowId),
+          'tauri_window_label': String(want.label),
+          'tauri_window_url': String(want.url),
+          'tauri_multiton': String(want.multiton),
+          'tauri_transparent': String(want.transparent),
+        };
+        let fullWant: Want = {
+          bundleName: context.applicationInfo.name,
+          abilityName: want.abilityName,
+          parameters: params
+        };
+        // Defer to the next event-loop tick: this handler is invoked from a Rust
+        // NAPI callback (func.call), and OHOS appears to drop want.parameters
+        // when context.startAbility is called inside a NAPI-reentrant context.
+        // setTimeout(0) moves the call to a pure ArkTS context (same as demo3's
+        // button onClick), restoring parameter forwarding.
+        hilog.info(DOMAIN, 'ArkHelper', 'startUIAbility fullWant: %{public}s', JSON.stringify(fullWant));
+        setTimeout(() => {
+          context.startAbility(fullWant).catch((err: ESObject) => {
+            hilog.error(DOMAIN, 'ArkHelper', 'startAbility failed: %{public}s', JSON.stringify(err));
+          });
+        }, 0);
+      } catch (err) {
+        hilog.error(DOMAIN, 'ArkHelper', 'startUIAbility failed: %{public}s', JSON.stringify(err));
+      }
+    },
+
     setWindowDecorations: (windowId: number, decorations: boolean): void => {
       try {
         const wm = WindowManager.getInstance();
@@ -584,6 +628,40 @@ export function createArkHelper(): ArkHelper {
     showWindowMethod: (windowId: number): void => {
       try { WindowManager.getInstance().showWindowMethod(windowId); }
       catch (err) { safeLogError('showWindowMethod', err); }
+    },
+
+    // Close/destroy a window: Float sub-window → win.destroyWindow() (real destroy);
+    // UIAbility main window → context.terminateSelf() (real close, not hide).
+    // Called via NAPI destroy_window.
+    closeWindow: (windowId: number): void => {
+      try { WindowManager.getInstance().closeWindow(windowId); }
+      catch (err) { safeLogError('closeWindow', err); }
+    },
+
+    // ─── A/D/E group completions ──────────────────────────────────────────────
+    hideWindow: (windowId: number): void => {
+      try { WindowManager.getInstance().hideWindow(windowId); }
+      catch (err) { safeLogError('hideWindow', err); }
+    },
+    setFullscreen: (windowId: number, on: boolean): void => {
+      try { WindowManager.getInstance().setFullscreen(windowId, on); }
+      catch (err) { safeLogError('setFullscreen', err); }
+    },
+    setWindowTouchable: (windowId: number, touchable: boolean): void => {
+      try { WindowManager.getInstance().setWindowTouchable(windowId, touchable); }
+      catch (err) { safeLogError('setWindowTouchable', err); }
+    },
+    setWindowDecorationFlags: (windowId: number, flags: number): void => {
+      try { WindowManager.getInstance().setDecorationFlags(windowId, flags); }
+      catch (err) { safeLogError('setWindowDecorationFlags', err); }
+    },
+    setPointerVisible: (visible: boolean): void => {
+      try { WindowManager.getInstance().setPointerVisible(visible); }
+      catch (err) { safeLogError('setPointerVisible', err); }
+    },
+    setPointerStyle: (windowId: number, style: number): void => {
+      try { WindowManager.getInstance().setPointerStyle(windowId, style); }
+      catch (err) { safeLogError('setPointerStyle', err); }
     },
 
     isMaximized: (windowId: number): boolean => {

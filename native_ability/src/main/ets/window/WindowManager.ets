@@ -1,5 +1,6 @@
 import { window, UIContext } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
+import pointer from '@ohos.multimodalInput.pointer';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { deviceInfo } from '@kit.BasicServicesKit';
 import { BusinessError } from '@kit.BasicServicesKit';
@@ -27,13 +28,33 @@ export interface SubWindowOptions {
   backgroundColor?: number;
 }
 
+// Enum of window kinds. All UIAbility windows are equal, no primary/subordinate distinction.
+export enum WindowKind {
+  UIAbility,  // All UIAbility main windows (id=0 or id>0, equivalent)
+  Float,      // Float sub-window created by windowStage.createSubWindow
+}
+
 export class WindowManager {
   private static instance: WindowManager | null = null;
   private context: common.UIAbilityContext;
-  private windowStage: window.WindowStage | null = null;
+  private uiAbilityStages: Map<number, window.WindowStage> = new Map();
+  // Per-instance UIAbilityContext (keyed by windowId). Needed to terminate a
+  // specific secondary instance via context.terminateSelf() — the process-level
+  // `this.context` only refers to the first instance, so without this map a
+  // secondary instance cannot be truly closed (only hidden via hideAbility).
+  private uiAbilityContexts: Map<number, common.UIAbilityContext> = new Map();
   private windows: Map<number, WindowEntry> = new Map();
   private controllers: Map<number, RustWebviewNodeController> = new Map();
   private uiContexts: Map<number, UIContext> = new Map();
+  // transparentFlags tracks each UIAbility window's transparent flag (keyed by windowId).
+  // Set in registerUIAbilityStage, queried by DefaultXComponent.aboutToAppear to apply
+  // setWindowBackgroundColor/setWindowContainerColor after the window is fully ready.
+  private transparentFlags: Map<number, boolean> = new Map();
+
+  // windowKinds tracks each window's kind (UIAbility or Float) by windowId.
+  // Used by isUIAbilityMainWindow() — windowId=0 is NOT special, all UIAbility
+  // windows (id=0 or id>0) are equal and system-managed.
+  private windowKinds: Map<number, WindowKind> = new Map();
 
   // Track the last focused window via WINDOW_ACTIVE (kept for backward compat / debugging)
   private lastFocusedWindow: window.Window | null = null;
@@ -82,17 +103,134 @@ export class WindowManager {
     return WindowManager.instance;
   }
 
-  setWindowStage(windowStage: window.WindowStage): void {
-    this.windowStage = windowStage;
-    hilog.info(DOMAIN, 'WindowManager', 'WindowStage set');
+  // Exposes the UIAbilityContext so NativeAbility.startUIAbility can call
+  // context.startAbility without holding its own reference (WindowManager is the
+  // shared singleton across EntryAbility instances in the same process).
+  getContext(): common.UIAbilityContext {
+    return this.context;
+  }
 
-    // Register main window (id=0) for focus tracking
+  // Whether the primary (first-instance) WindowStage has been registered.
+  // Unified registration for all UIAbility WindowStages (id=0 first instance
+  // or id>0 subsequent instances — equal, no primary/subordinate distinction).
+  // Stores stage in uiAbilityStages, sets windowKinds, replays pending init,
+  // and registers focus tracking.
+  registerUIAbilityStage(windowId: number, windowStage: window.WindowStage, context: common.UIAbilityContext, transparent: boolean = false): void {
+    const wid = Number(windowId);
+    this.uiAbilityStages.set(wid, windowStage);
+    this.uiAbilityContexts.set(wid, context);
+    this.windowKinds.set(wid, WindowKind.UIAbility);
+    this.transparentFlags.set(wid, transparent);
+    hilog.info(DOMAIN, 'WindowManager', 'UIAbility stage registered: id=%{public}d transparent=%{public}s', wid, String(transparent));
+    this.replayPendingForWindow(wid);
+
+    // Register focus tracking for this window
     try {
       const mainWindow = windowStage.getMainWindowSync();
-      this.registerFocusTracking(mainWindow, 0);
-      hilog.info(DOMAIN, 'WindowManager', 'Main window focus tracking registered');
+      this.registerFocusTracking(mainWindow, wid);
     } catch (e) {
-      hilog.warn(DOMAIN, 'WindowManager', 'Failed to register main window focus tracking: %{public}s', String(e));
+      hilog.warn(DOMAIN, 'WindowManager', 'Failed to register focus tracking for id=%{public}d: %{public}s', wid, String(e));
+    }
+
+    // Transparency is applied in createWebview (when data.transparent=true),
+    // not here — onWindowStageCreate is too early (setWindowBackgroundColor
+    // fails with "window state is abnormal"). createWebview runs after the
+    // window is fully ready, so setWindowContainerColor succeeds there.
+  }
+
+  unregisterUIAbilityStage(windowId: number): void {
+    const wid = Number(windowId);
+    this.uiAbilityStages.delete(wid);
+    this.uiAbilityContexts.delete(wid);
+    this.windowKinds.delete(wid);
+    this.transparentFlags.delete(wid);
+    this.controllers.delete(wid);
+    this.uiContexts.delete(wid);
+    this.pendingInits.delete(wid);
+    this.pendingUrls.delete(wid);
+    this.pendingJsHelperProxies.delete(wid);
+    this.pendingBlurs.delete(wid);
+    hilog.info(DOMAIN, 'WindowManager', 'UIAbility stage unregistered: id=%{public}d', wid);
+  }
+
+  // Whether the given window is a UIAbility main window.
+  // Such windows are system-managed: win.resize()/moveWindowTo() return 1300002,
+  // decorations are system-provided, and per-button enable flags are no-ops.
+  // windowId=0 alone must NOT be used for this judgement — a subsequent UIAbility
+  // instance has id>0 but is still a system-managed main window.
+  isUIAbilityMainWindow(windowId: number): boolean {
+    const wid = Number(windowId);
+    return this.windowKinds.get(wid) === WindowKind.UIAbility;
+  }
+
+  // Query whether a UIAbility window was created with transparent=true.
+  isTransparent(windowId: number): boolean {
+    const wid = Number(windowId);
+    return this.transparentFlags.get(wid) === true;
+  }
+
+  // Apply transparent background + container color to a UIAbility main window.
+  // Called by DefaultXComponent.aboutToAppear (window fully ready there).
+  // active=transparent, inactive=opaque white (inactive alpha=0 triggers error 401).
+  async applyTransparentBackground(windowId: number): Promise<void> {
+    const wid = Number(windowId);
+    if (!this.isTransparent(wid)) {
+      return;
+    }
+    const stage = this.uiAbilityStages.get(wid);
+    if (!stage) {
+      hilog.warn(DOMAIN, 'WindowManager', 'applyTransparentBackground: no stage for id=%{public}d', wid);
+      return;
+    }
+    try {
+      const mainWindow = await stage.getMainWindow();
+      mainWindow.setWindowBackgroundColor('#00000000');
+      hilog.info(DOMAIN, 'WindowManager', 'applyTransparentBackground: windowId=%{public}d setWindowBackgroundColor transparent OK', wid);
+      if (deviceInfo.sdkApiVersion >= 20) {
+        try {
+          mainWindow.setWindowContainerColor('#00000000', '#FFFFFFFF');
+          hilog.info(DOMAIN, 'WindowManager', 'applyTransparentBackground: windowId=%{public}d setWindowContainerColor transparent OK (active=transparent inactive=white)', wid);
+        } catch (containerErr: any) {
+          hilog.warn(DOMAIN, 'WindowManager', 'applyTransparentBackground: windowId=%{public}d setWindowContainerColor failed: code=%{public}d', wid, containerErr.code);
+        }
+      }
+    } catch (e) {
+      hilog.warn(DOMAIN, 'WindowManager', 'applyTransparentBackground: windowId=%{public}d failed: %{public}s', wid, String(e));
+    }
+  }
+
+  // Replay pending WebView init data / URLs queued against a window id before its
+  // controller was ready. Called by registerUIAbilityStage when the new
+  // UIAbility instance's WindowStage is registered. The JsHelper proxy binding is
+  // NOT done here — it requires a full JsHelper (result.controller from addWebview),
+  // not the raw RustWebviewNodeController stored in this.controllers. Proxy binding
+  // happens in registerController when DefaultXComponent.aboutToAppear runs and
+  // calls addWebview (which returns the full JsHelper).
+  private replayPendingForWindow(wid: number): void {
+    const controller = this.controllers.get(wid);
+    if (!controller) {
+      // Controller not registered yet (DefaultXComponent.aboutToAppear hasn't run).
+      // Replay will be triggered again by registerController.
+      return;
+    }
+    const init = this.pendingInits.get(wid);
+    if (init) {
+      try {
+        controller.addWebview(init);
+      } catch (e) {
+        hilog.warn(DOMAIN, 'WindowManager', 'replayPendingForWindow addWebview %{public}d failed: %{public}s', wid, String(e));
+      }
+      this.pendingInits.delete(wid);
+    }
+    const url = this.pendingUrls.get(wid);
+    if (url) {
+      try {
+        const urlData: WebviewInitData = { url };
+        controller.addWebview(urlData);
+      } catch (e) {
+        hilog.warn(DOMAIN, 'WindowManager', 'replayPendingForWindow url load %{public}d failed: %{public}s', wid, String(e));
+      }
+      this.pendingUrls.delete(wid);
     }
   }
 
@@ -216,18 +354,18 @@ export class WindowManager {
   moveWindowTo(windowId: number, x: number, y: number): void {
     const wid = Number(windowId);
     const win = this.getWindow(wid);
-    if (!win) { return; }
+    if (!win) { this.logNotFound('moveWindowTo', wid); return; }
     win.moveWindowTo(x, y).catch((err: ESObject) => {
-      hilog.error(DOMAIN, 'WindowManager', 'moveWindowTo failed: %{public}s', JSON.stringify(err));
+      hilog.warn(DOMAIN, 'WindowManager', 'moveWindowTo %{public}d failed: %{public}s', wid, JSON.stringify(err));
     });
   }
 
   resizeWindow(windowId: number, width: number, height: number): void {
     const wid = Number(windowId);
     const win = this.getWindow(wid);
-    if (!win) { return; }
+    if (!win) { this.logNotFound('resizeWindow', wid); return; }
     win.resize(width, height).catch((err: ESObject) => {
-      hilog.error(DOMAIN, 'WindowManager', 'resizeWindow failed: %{public}s', JSON.stringify(err));
+      hilog.warn(DOMAIN, 'WindowManager', 'resizeWindow %{public}d failed: %{public}s', wid, JSON.stringify(err));
     });
   }
 
@@ -270,6 +408,96 @@ export class WindowManager {
     });
   }
 
+  // hide: UIAbility main window uses hideAbility; Float sub-window uses minimize
+  // (OHOS has no standalone hideWindow API).
+  // TODO(遗留问题三): hideAbility 仅 UIAbility 可用且需状态栏前置条件;Float 用 minimize
+  //   冒充(语义不符,is_minimized 误报 true);show/hide 不对称(主窗口 hide 后 show 无法恢复)。
+  //   详见 doc/OHOS窗口遗留问题.md(问题三)。
+  hideWindow(windowId: number): void {
+    if (this.isUIAbilityMainWindow(windowId)) {
+      this.hideAbility();
+      return;
+    }
+    const win = this.getWindow(windowId);
+    if (!win) { this.logNotFound('hideWindow', windowId); return; }
+    win.minimize().catch((err: ESObject) => {
+      hilog.warn(DOMAIN, 'WindowManager', 'hideWindow(minimize) %{public}d failed: %{public}s', windowId, JSON.stringify(err));
+    });
+  }
+
+  // set_fullscreen → PC/2in1 immersive fullscreen: maximize(ENTER_IMMERSIVE) +
+  // hide title bar / Dock hover.
+  // Reference implementation: demo3signature/entry/src/main/ets/pages/Index.ets toggleFullScreen.
+  // setWindowLayoutFullScreen is resolve-but-no-op for the main UIAbility window
+  // (size unchanged), so it is not used here.
+  // setTitleAndDockHoverShown is a PC/2in1-only API (throws on phones; the catch
+  // fallback does not affect basic fullscreen).
+  setFullscreen(windowId: number, on: boolean): void {
+    const win = this.getWindow(windowId);
+    if (!win) { this.logNotFound('setFullscreen', windowId); return; }
+    hilog.info(DOMAIN, 'WindowManager', 'setFullscreen %{public}d on=%{public}s ENTER', windowId, String(on));
+    if (on) {
+      // Enter immersive fullscreen: maximize(ENTER_IMMERSIVE) → hide title bar + Dock hover
+      win.maximize(window.MaximizePresentation.ENTER_IMMERSIVE).then(() => {
+        hilog.info(DOMAIN, 'WindowManager', 'setFullscreen %{public}d maximize(ENTER_IMMERSIVE) OK', windowId);
+        return win.setTitleAndDockHoverShown(false, false);
+      }).then(() => {
+        hilog.info(DOMAIN, 'WindowManager', 'setFullscreen %{public}d setTitleAndDockHoverShown(false,false) OK', windowId);
+      }).catch((err: ESObject) => {
+        hilog.warn(DOMAIN, 'WindowManager', 'setFullscreen %{public}d on=true failed: %{public}s', windowId, JSON.stringify(err));
+      });
+    } else {
+      // Exit fullscreen: recover() → show title bar + Dock hover
+      win.recover().then(() => {
+        hilog.info(DOMAIN, 'WindowManager', 'setFullscreen %{public}d recover() OK', windowId);
+        return win.setTitleAndDockHoverShown(true, true);
+      }).then(() => {
+        hilog.info(DOMAIN, 'WindowManager', 'setFullscreen %{public}d setTitleAndDockHoverShown(true,true) OK', windowId);
+      }).catch((err: ESObject) => {
+        hilog.warn(DOMAIN, 'WindowManager', 'setFullscreen %{public}d on=false failed: %{public}s', windowId, JSON.stringify(err));
+      });
+    }
+  }
+
+  // set_ignore_cursor_events → setWindowTouchable (touchable = !ignore, tao side inverts before passing in)
+  setWindowTouchable(windowId: number, touchable: boolean): void {
+    const win = this.getWindow(windowId);
+    if (!win) { this.logNotFound('setWindowTouchable', windowId); return; }
+    win.setWindowTouchable(touchable).catch((err: ESObject) => {
+      hilog.warn(DOMAIN, 'WindowManager', 'setWindowTouchable %{public}d failed: %{public}s', windowId, JSON.stringify(err));
+    });
+  }
+
+  // Group D decoration button bitfield: bit0 closable, bit1 maximizable, bit2 minimizable, bit3 resizable.
+  // Only applies to Float sub-windows (writes LocalStorage); UIAbility main window is a no-op
+  // (decorations are system-provided).
+  setDecorationFlags(windowId: number, flags: number): void {
+    if (this.isUIAbilityMainWindow(windowId)) {
+      hilog.info(DOMAIN, 'WindowManager', 'setDecorationFlags: UIAbility main window (id=%{public}d) no-op', windowId);
+      return;
+    }
+    const entry = this.windows.get(windowId);
+    if (!entry || !entry.storage) {
+      hilog.warn(DOMAIN, 'WindowManager', 'setDecorationFlags: window %{public}d not found', windowId);
+      return;
+    }
+    entry.storage.setOrCreate('closable', (flags & 1) !== 0);
+    entry.storage.setOrCreate('maximizable', (flags & 2) !== 0);
+    entry.storage.setOrCreate('minimizable', (flags & 4) !== 0);
+    entry.storage.setOrCreate('resizable', (flags & 8) !== 0);
+  }
+
+  // Group E cursor: @ohos.multimodalInput.pointer
+  setPointerVisible(visible: boolean): void {
+    try { pointer.setPointerVisible(visible); }
+    catch (err) { hilog.warn(DOMAIN, 'WindowManager', 'setPointerVisible failed: %{public}s', JSON.stringify(err)); }
+  }
+
+  setPointerStyle(windowId: number, style: number): void {
+    try { pointer.setPointerStyleSync(windowId, style as pointer.PointerStyle); }
+    catch (err) { hilog.warn(DOMAIN, 'WindowManager', 'setPointerStyle %{public}d failed: %{public}s', windowId, JSON.stringify(err)); }
+  }
+
   isMaximized(windowId: number): boolean {
     const win = this.getWindow(windowId);
     if (!win) { return false; }
@@ -298,12 +526,27 @@ export class WindowManager {
     this.removeWindow(windowId);
   }
 
-  // Close a sub-window (id > 0): destroy + cleanup + reset.
-  // For main window (id=0): hideAbility() + reset.
+  // Close a window for real (not hide).
+  // - UIAbility main window (id=0 first instance or id>0 subsequent instance):
+  //   terminate the Ability instance via context.terminateSelf(). This truly
+  //   closes the instance (removed from recent tasks), distinct from hideAbility
+  //   which only backgrounds it. The first instance (id=0) terminating == app
+  //   exit; secondary instances (id>0) terminating == that instance only exits.
+  // - Float sub-window: win.destroyWindow() + removeWindow cleanup.
   async closeWindow(windowId: number): Promise<void> {
-    if (windowId <= 0) {
-      // Main window: hide the Ability to background
-      await this.hideAbility();
+    if (this.isUIAbilityMainWindow(windowId)) {
+      const ctx = this.uiAbilityContexts.get(Number(windowId));
+      if (ctx) {
+        hilog.info(DOMAIN, 'WindowManager', 'closeWindow: terminateSelf for UIAbility id=%{public}d', windowId);
+        try {
+          await ctx.terminateSelf();
+        } catch (e) {
+          hilog.warn(DOMAIN, 'WindowManager', 'closeWindow: terminateSelf failed for id=%{public}d: %{public}s', windowId, String(e));
+        }
+      } else {
+        hilog.warn(DOMAIN, 'WindowManager', 'closeWindow: no context for UIAbility id=%{public}d (not registered?), falling back to hideAbility', windowId);
+        await this.hideAbility();
+      }
       return;
     }
     const win = this.getWindow(windowId);
@@ -318,6 +561,10 @@ export class WindowManager {
     }
     // removeWindow handles conditional resetUserInteractionTracking
     this.removeWindow(windowId);
+  }
+
+  private logNotFound(op: string, windowId: number): void {
+    hilog.warn(DOMAIN, 'WindowManager', `%{public}s: window %{public}d not found`, op, windowId);
   }
 
   // Hide the entire Ability (app) to background.
@@ -419,7 +666,7 @@ export class WindowManager {
     }
 
     // Check if windowStage has been set
-    if (!this.windowStage) {
+    if (!this.uiAbilityStages.has(0)) {
       hilog.error(DOMAIN, 'WindowManager', 'WindowStage not set. Call setWindowStage() first.');
       throw new Error('WindowStage not set');
     }
@@ -429,7 +676,7 @@ export class WindowManager {
     let win: window.Window;
     try {
       // Use windowStage.createSubWindow(name) instead of window.createWindow(config)
-      win = await this.windowStage.createSubWindow(name);
+      win = await this.uiAbilityStages.get(0)?.createSubWindow(name);
       hilog.info(DOMAIN, 'WindowManager', `Sub-window created successfully: %{public}d`, windowId);
     } catch (err) {
       hilog.error(DOMAIN, 'WindowManager', `Failed to create sub-window: %{public}s`, JSON.stringify(err));
@@ -468,23 +715,14 @@ export class WindowManager {
     try {
       // Apply transparent/backgroundColor settings
       if (transparent) {
-        hilog.info(DOMAIN, 'WindowManager', `Setting window %{public}d to transparent`, windowId);
+        hilog.info(DOMAIN, 'WindowManager', `Setting Float window %{public}d to transparent`, windowId);
         await win.setWindowBackgroundColor('#00000000');
-        // On 2in1 devices (API 20+), also set container color for full transparency
-        if (deviceInfo.sdkApiVersion >= 20) {
-          try {
-            await win.setWindowContainerColor('#00000000', '#00000000');
-            hilog.info(DOMAIN, 'WindowManager', `Window %{public}d container color set to transparent (API %{public}d)`, windowId, deviceInfo.sdkApiVersion);
-          } catch (containerErr: any) {
-            if (containerErr.code === 801) {
-              hilog.debug(DOMAIN, 'WindowManager', 'setWindowContainerColor not supported on this device (error 801)');
-            } else if (containerErr.code === 201) {
-              hilog.error(DOMAIN, 'WindowManager', 'setWindowContainerColor permission denied (error 201): missing ohos.permission.SET_WINDOW_TRANSPARENT');
-            } else {
-              hilog.warn(DOMAIN, 'WindowManager', `Sub-window container color failed: code=%{public}d`, containerErr.code);
-            }
-          }
-        }
+        // Note: setWindowContainerColor is NOT called here — it only applies to
+        // UIAbility main windows (which have a window container), not to Float
+        // sub-windows (createSubWindow products). Float transparency comes from
+        // setWindowBackgroundColor + the ArkUI container (DefaultXComponent) being
+        // already transparent. UIAbility main window transparency is handled in
+        // registerUIAbilityStage via setWindowContainerColor.
       } else if (backgroundColor !== undefined) {
         const colorStr = '#' + backgroundColor.toString(16).padStart(8, '0');
         hilog.info(DOMAIN, 'WindowManager', `Setting window %{public}d background color to %{public}s`, windowId, colorStr);
@@ -617,12 +855,22 @@ export class WindowManager {
     // BigInt (0n === 0 is false in JS, which would silently miss the windowStage branch
     // and the number-keyed Map). Centralizing here covers all callers.
     const wid = Number(id);
-    // Main window (id=0) is not in the windows Map, get it from windowStage
-    if (wid === 0 && this.windowStage) {
+    // First main window (id=0) lives on the primary windowStage.
+    if (wid === 0 && this.uiAbilityStages.has(0)) {
       try {
-        return this.windowStage.getMainWindowSync();
+        return this.uiAbilityStages.get(0)?.getMainWindowSync();
       } catch (e) {
         hilog.warn(DOMAIN, 'WindowManager', 'Failed to get main window: %{public}s', String(e));
+        return undefined;
+      }
+    }
+    // Subsequent UIAbility instance main windows live on their own WindowStage.
+    const secStage = this.uiAbilityStages.get(wid);
+    if (secStage) {
+      try {
+        return secStage.getMainWindowSync();
+      } catch (e) {
+        hilog.warn(DOMAIN, 'WindowManager', 'Failed to get subsequent main window %{public}d: %{public}s', wid, String(e));
         return undefined;
       }
     }
@@ -633,43 +881,67 @@ export class WindowManager {
   getAllWindowIds(): number[] {
     const ids = Array.from(this.windows.keys());
     // Include main window (id=0) if windowStage is set
-    if (this.windowStage && !ids.includes(0)) {
+    if (this.uiAbilityStages.has(0) && !ids.includes(0)) {
       ids.unshift(0);
+    }
+    // Include subsequent UIAbility main windows
+    for (const sid of this.uiAbilityStages.keys()) {
+      if (!ids.includes(sid)) {
+        ids.push(sid);
+      }
     }
     return ids;
   }
 
-  // Phase 2: Update window decorations at runtime via LocalStorage reactive update
+  // setDecorations: controls visibility of window decorations (title bar).
+  // Main UIAbility window: win.setWindowDecorVisible(decorations) — PC/2in1 window decoration API (since API 20).
+  //   Reference implementation: demo3signature/entry/src/main/ets/pages/Index.ets toggleWindowDecor.
+  //   The old implementation used hideSystemBar/showSystemBar (status bar), which is wrong —
+  //   status bar != title bar.
+  //   May be unsupported on phones (throws 801); the catch fallback does not affect other logic.
+  // Float sub-window: LocalStorage setOrCreate('decorations') — FloatPage @LocalStorageProp reactively re-renders.
   setDecorations(windowId: number, decorations: boolean): void {
+    hilog.info(DOMAIN, 'WindowManager', 'setDecorations %{public}d decorations=%{public}s ENTER', windowId, String(decorations));
+    // Float sub-window: write LocalStorage to drive FloatPage title bar show/hide
     const entry = this.windows.get(windowId);
     if (entry && entry.storage) {
       entry.storage.setOrCreate('decorations', decorations);
-      hilog.info(DOMAIN, 'WindowManager', `Decorations set to %{public}s for window %{public}d`, String(decorations), windowId);
+      hilog.info(DOMAIN, 'WindowManager', `Decorations set to %{public}s for Float window %{public}d (LocalStorage)`, String(decorations), windowId);
     }
-    // Main window (windowId=0): hide or restore system status bar
-    if (windowId === 0) {
-      if (!decorations) {
-        this.hideSystemBar();
-      } else {
-        this.showSystemBar();
+    // UIAbility main window: call setWindowDecorVisible directly to control the system title bar
+    if (this.isUIAbilityMainWindow(windowId)) {
+      const win = this.getWindow(windowId);
+      if (!win) {
+        hilog.warn(DOMAIN, 'WindowManager', 'setDecorations: main window %{public}d not found', windowId);
+        return;
+      }
+      try {
+        win.setWindowDecorVisible(decorations);
+        hilog.info(DOMAIN, 'WindowManager', 'setDecorations %{public}d setWindowDecorVisible(%{public}s) OK', windowId, String(decorations));
+      } catch (err) {
+        // 801: device not supported (phones); 1300002: abnormal window state. Does not affect other logic.
+        hilog.warn(DOMAIN, 'WindowManager', 'setDecorations %{public}d setWindowDecorVisible failed: %{public}s', windowId, JSON.stringify(err));
       }
     }
   }
 
   setWindowBackgroundColor(windowId: number, color: number): void {
     const colorStr = '#' + color.toString(16).padStart(8, '0');
-    hilog.debug(DOMAIN, 'WindowManager', `setWindowBackgroundColor: windowId=%{public}d, color=%{public}s`, windowId, colorStr);
-    if (windowId === 0 && this.windowStage) {
+    hilog.info(DOMAIN, 'WindowManager', `setWindowBackgroundColor: windowId=%{public}d, color=%{public}s`, windowId, colorStr);
+    // UIAbility main windows (first id=0 or subsequent id>0): set on the stage's main window
+    if (this.isUIAbilityMainWindow(windowId)) {
       try {
-        const mainWindow = this.windowStage.getMainWindowSync();
-        mainWindow.setWindowBackgroundColor(colorStr);
-        if (deviceInfo.sdkApiVersion >= 20) {
-          try {
-            mainWindow.setWindowContainerColor(colorStr, colorStr);
-          } catch (containerErr: any) {
-            hilog.debug(DOMAIN, 'WindowManager', 'setWindowContainerColor: code=%{public}d', containerErr.code);
-          }
+        const mainWindow = this.getWindow(windowId);
+        if (!mainWindow) {
+          hilog.warn(DOMAIN, 'WindowManager', `setWindowBackgroundColor: main window %{public}d not found`, windowId);
+          return;
         }
+        mainWindow.setWindowBackgroundColor(colorStr);
+        // NOTE: setWindowContainerColor is NOT called here — it controls the window
+        // container layer (incl. title bar area) and is only set at creation time
+        // (applyTransparentBackground). Calling it at runtime with the same color
+        // for active+inactive overwrites the title bar. setWindowBackgroundColor
+        // only affects the window background, not the container.
       } catch (e) {
         hilog.error(DOMAIN, 'WindowManager', `Failed to set main window background: %{public}s`, String(e));
       }
@@ -704,9 +976,9 @@ export class WindowManager {
     }
   }
   private hideSystemBar(): void {
-    if (!this.windowStage) return;
+    if (!this.uiAbilityStages.has(0)) return;
     try {
-      const mainWindow = this.windowStage.getMainWindowSync();
+      const mainWindow = this.uiAbilityStages.get(0)?.getMainWindowSync();
       const names: Array<'status' | 'navigation'> = [];
       mainWindow.setWindowSystemBarEnable(names).catch((err: BusinessError) => {
         hilog.warn(DOMAIN, 'WindowManager', `Failed to hide system bar: %{public}s`, err.message);
@@ -718,9 +990,9 @@ export class WindowManager {
 
   // Phase 2: Show system status bar for main window (decorations=true)
   private showSystemBar(): void {
-    if (!this.windowStage) return;
+    if (!this.uiAbilityStages.has(0)) return;
     try {
-      const mainWindow = this.windowStage.getMainWindowSync();
+      const mainWindow = this.uiAbilityStages.get(0)?.getMainWindowSync();
       const names: Array<'status' | 'navigation'> = ['status', 'navigation'];
       mainWindow.setWindowSystemBarEnable(names).catch((err: BusinessError) => {
         hilog.warn(DOMAIN, 'WindowManager', `Failed to show system bar: %{public}s`, err.message);
@@ -762,10 +1034,12 @@ export class WindowManager {
       hilog.info(DOMAIN, 'WindowManager', 'Cleared lastUserInteractedWindowId (removed window)');
     }
     this.windows.delete(windowId);
+    this.windowKinds.delete(windowId);
     this.controllers.delete(windowId);
     this.uiContexts.delete(windowId);
     this.pendingJsHelperProxies.delete(windowId);
     this.pendingUrls.delete(windowId);
     this.pendingInits.delete(windowId);
+    this.pendingBlurs.delete(windowId);
   }
 }

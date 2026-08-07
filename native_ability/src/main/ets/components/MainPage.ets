@@ -14,10 +14,14 @@ import { WindowManager } from '../window/WindowManager';
 
 export const RouteName = "NativeAbility";
 
-@Entry({ routeName: RouteName })
+@Entry({ routeName: RouteName, storage: LocalStorage.getShared() })
 @Component
 struct MainPage {
   @StorageProp("moduleName") moduleNames: string | string[] = "";
+  // Subsequent UIAbility instances receive their windowId via LocalStorage
+  // (set by NativeAbility.onWindowStageCreate → loadContentByName(storage)).
+  // First instance has no LocalStorage windowId — defaults to 0.
+  @LocalStorageProp('windowId') windowId: number = MAIN_WINDOW_ID;
 
   // loadMode is immutable after onCreate, no need for @StorageProp reactive binding
   private loadMode: "async" | "sync" = "async";
@@ -66,14 +70,14 @@ struct MainPage {
     Stack() {
       Column() {
         MenuBarComponent({
-          windowId: MAIN_WINDOW_ID,
+          windowId: this.windowId,
           acceleratorMatcher: this.acceleratorMatcher,
         })
 
         Row() {
           Column() {
             if (this.resolvedModuleName !== "") {
-              DefaultXComponent({ moduleName: this.resolvedModuleName, windowId: MAIN_WINDOW_ID })
+              DefaultXComponent({ moduleName: this.resolvedModuleName, windowId: this.windowId })
             } else {
               Text("Loading Main Window...")
                 .fontSize(20)
@@ -117,7 +121,7 @@ struct MainPage {
     .onTouch((event: TouchEvent) => {
       if (event.type === TouchType.Down) {
         try {
-          WindowManager.getInstance().setUserInteractedWindow(MAIN_WINDOW_ID);
+          WindowManager.getInstance().setUserInteractedWindow(this.windowId);
         } catch (e) {
           hilog.warn(DOMAIN, 'MainPage', 'onTouch: WindowManager not ready: %{public}s', String(e));
         }

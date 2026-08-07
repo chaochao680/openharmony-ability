@@ -755,6 +755,12 @@ pub fn notify_window_close(window_id: i32) {
 
 /// Drain all pending window close requests.
 /// Called by tauri-runtime-wry event loop to process queued closes.
+///
+/// TODO(遗留问题一): 这是 OHOS 关窗事件的旁路通道,因 tao 的 WindowId 是 ZST、
+///   MainEvent::WindowDestroy 不携带窗口身份,关窗只能由 ArkTS 把真实 windowId
+///   压入本队列,runtime-wry 每轮 drain 后用真实 id 精确匹配 Tauri 窗口。
+///   其他平台无需此机制(系统 API 天然带窗口身份)。
+///   根因、影响范围(不止关窗)、根治路径见 doc/OHOS窗口遗留问题.md(问题一)
 #[cfg(target_env = "ohos")]
 pub fn drain_pending_window_closes() -> Vec<i32> {
     PENDING_WINDOW_CLOSES

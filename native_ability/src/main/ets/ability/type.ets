@@ -137,6 +137,17 @@ export interface AccountInfo {
   accessToken: string | null;
 }
 
+// Want params for starting a new EntryAbility instance (multi-UIAbility-instance path).
+// Rust NAPI (start_ui_ability) builds this object and passes it to ArkHelper.startUIAbility.
+export interface UIAbilityWantParams {
+  abilityName: string;       // "EntryAbility" — reuse same class, new instance via launchType:standard
+  windowId: number;          // Rust-pre-allocated id (NEXT_WINDOW_ID), carried in want.parameters
+  label: string;             // window label, for debugging / routing
+  url: string;               // initial URL to load in the new instance's webview
+  multiton: boolean;         // reserved: true=standard (new instance each call), false=singleton (onNewWant)
+  transparent: boolean;      // if true, new instance sets setWindowContainerColor transparent on its main window
+}
+
 export interface ArkHelper {
   exit: (code: number) => void;
   restart: () => number;
@@ -151,6 +162,7 @@ export interface ArkHelper {
   requestPermission: (permission: string | string[]) => Promise<number | number[]>;
   getWindowAvoidArea: (type: number, windowId: number) => WindowAvoidAreaInfo | undefined;
   createOSWindow: (config: WindowConfig) => Promise<number>;
+  startUIAbility: (want: UIAbilityWantParams) => void;
   setWindowDecorations: (windowId: number, decorations: boolean) => void;
   setWindowBackgroundColor: (windowId: number, color: number) => void;
   focusWindow: (windowId: number) => void;
@@ -162,9 +174,17 @@ export interface ArkHelper {
   restoreWindow: (windowId: number) => void;
   recoverWindow: (windowId: number) => void;
   showWindowMethod: (windowId: number) => void;
+  closeWindow: (windowId: number) => void;
   isMaximized: (windowId: number) => boolean;
   isMinimized: (windowId: number) => boolean;
   setWindowBlur: (windowId: number, radius: number) => void;
+  // A/D/E group completions
+  hideWindow: (windowId: number) => void;
+  setFullscreen: (windowId: number, on: boolean) => void;
+  setWindowTouchable: (windowId: number, touchable: boolean) => void;
+  setWindowDecorationFlags: (windowId: number, flags: number) => void;
+  setPointerVisible: (visible: boolean) => void;
+  setPointerStyle: (windowId: number, style: number) => void;
   loadUrl: (id: number, url: string) => void;
   createMenu?: (options: MenuCreateOptions) => Promise<string>;
   createMenuItem?: (options: MenuItemCreateOptions) => Promise<string>;
