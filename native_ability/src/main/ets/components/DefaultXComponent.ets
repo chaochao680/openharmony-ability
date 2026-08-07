@@ -58,12 +58,21 @@ export struct DefaultXComponent {
   // Global ArkHelper instance (window-agnostic)
   private helper: ArkHelper = createArkHelper();
 
-  // Check if this is the main window based on windowId
-  private isMainWindow(): boolean {
-    const result = this.windowId === MAIN_WINDOW_ID;
-    hilog.info(DOMAIN, 'DefaultXComponent', 'isMainWindow() called: windowId=%{public}d, result=%{public}b', 
-      this.windowId, result);
-    return result;
+  // Check if this is a UIAbility window (id=0 first instance or id>0 subsequent)
+  // by querying windowKinds — NOT by windowId===0.
+  private isUIAbilityWindow(): boolean {
+    try {
+      return WindowManager.getInstance().isUIAbilityMainWindow(this.windowId);
+    } catch (e) {
+      // WindowManager not ready (first instance hasn't registered yet) —
+      // fall back to windowId===0 for the first instance
+      return this.windowId === MAIN_WINDOW_ID;
+    }
+  }
+
+  // Check if this is the first UIAbility instance (windowId=0)
+  private isFirstUIAbility(): boolean {
+    return this.windowId === MAIN_WINDOW_ID;
   }
 
   // loadMode is read only once in aboutToAppear; no need for @StorageProp reactive binding
@@ -89,12 +98,9 @@ export struct DefaultXComponent {
       this.moduleName, this.windowId);
 
     setAbilityContext(this.getUIContext().getHostContext() as common.UIAbilityContext);
-    // Only set helperRef for main window. Sub-windows (FloatPage) create their own
-    // ArkHelper but must NOT overwrite the global helperRef, because:
-    // - Rust's init_tray_tsfn() sets _onIconClick/_onMenuClick only on the main window's helper
-    // - The statusBarManager PROXY callback reads helperRef to dispatch click events
-    // - If a FloatPage overwrites helperRef, the PROXY reads a helper without NAPI callbacks
-    if (this.isMainWindow()) {
+    // Only set helperRef for the first UIAbility (windowId=0). Subsequent UIAbility
+    // instances and Float sub-windows must NOT overwrite the global helperRef.
+    if (this.isFirstUIAbility()) {
       setHelperRef(this.helper);
     }
 
@@ -115,49 +121,48 @@ export struct DefaultXComponent {
       this.webviewController = new RustWebviewNodeController(uiCtx);
       hilog.info(DOMAIN, 'DefaultXComponent', 'RustWebviewNodeController created');
 
-      if (this.isMainWindow()) {
-        // Main window mode: call render to set up helper and XComponent
-        hilog.info(DOMAIN, 'DefaultXComponent', 'Entering MAIN WINDOW logic');
-        const moduleName = this.moduleName.trim();
-        if (!moduleName) {
-          hilog.error(DOMAIN, 'DefaultXComponent', 'moduleName is empty, cannot initialize main window');
-          throw new Error("DefaultXComponent.moduleName is required for main window");
+      if (this.isUIAbilityWindow()) {
+        // UIAbility window (id=0 first instance or id>0 subsequent — equal)
+        if (this.isFirstUIAbility()) {
+          // First instance: load native module + render (initializes global singletons:
+          // set_helper / set_main_thread_env / TSFN / RootNode + XComponent)
+          hilog.info(DOMAIN, 'DefaultXComponent', 'First UIAbility: loading native module + render');
+          const moduleName = this.moduleName.trim();
+          if (!moduleName) {
+            throw new Error("DefaultXComponent.moduleName is required for first UIAbility");
+          }
+          this.nativeModule = await Loadable.load(moduleName, this.loadMode);
+          AppStorage.setOrCreate<ESObject>(NATIVE_MODULE_STORAGE_KEY, this.nativeModule);
+          this.nativeModule.render(this.helper, this.rootSlot);
+          hilog.info(DOMAIN, 'DefaultXComponent', 'render() completed for windowId=%{public}d', this.windowId);
+        } else {
+          // Subsequent UIAbility (id>0): skip render (global singletons already
+          // initialized by first instance). nativeModule from ProcessInitializer/AppStorage.
+          hilog.info(DOMAIN, 'DefaultXComponent', 'Subsequent UIAbility: skipping render, windowId=%{public}d', this.windowId);
+          this.nativeModule = AppStorage.get<ESObject>(NATIVE_MODULE_STORAGE_KEY) as ESObject;
         }
 
-        hilog.info(DOMAIN, 'DefaultXComponent', 'Loading native module: %{public}s', moduleName);
-        this.nativeModule = await Loadable.load(moduleName, this.loadMode);
-        hilog.info(DOMAIN, 'DefaultXComponent', 'Native module loaded, calling render()');
-
-        // Store NAPI module reference in AppStorage so ArkHelper can access
-        // notifyWindowClose() for proper sub-window close lifecycle.
-        // All windows share the same native module loaded from the .so,
-        // so multiple XComponent creations just overwrite with the same reference.
-        AppStorage.setOrCreate<ESObject>(NATIVE_MODULE_STORAGE_KEY, this.nativeModule);
-
-        this.nativeModule.render(this.helper, this.rootSlot);
-        hilog.info(DOMAIN, 'DefaultXComponent', 'render() completed');
-
-        // Register main window to WindowManager (id=0)
+        // Register controller for all UIAbility windows
         try {
           const wm = WindowManager.getInstance();
-          wm.registerController(MAIN_WINDOW_ID, this.webviewController);
-          hilog.info(DOMAIN, 'DefaultXComponent', 'Main window registered to WindowManager with id=%{public}d', MAIN_WINDOW_ID);
+          wm.registerController(this.windowId, this.webviewController);
+          hilog.info(DOMAIN, 'DefaultXComponent', 'UIAbility controller registered: id=%{public}d', this.windowId);
         } catch (err) {
-          hilog.warn(DOMAIN, 'DefaultXComponent', 'Failed to register main window to WindowManager: %{public}s',
-            JSON.stringify(err));
-        }
-      } else {
-        // Sub-window mode: register to WindowManager
-        hilog.info(DOMAIN, 'DefaultXComponent', 'Entering SUB WINDOW logic');
-        if (this.windowId === MAIN_WINDOW_ID) {
-          hilog.error(DOMAIN, 'DefaultXComponent', 'windowId is MAIN_WINDOW_ID but not main window, this should not happen');
-          return;
+          hilog.warn(DOMAIN, 'DefaultXComponent', 'Failed to register controller: %{public}s', JSON.stringify(err));
         }
 
-        hilog.info(DOMAIN, 'DefaultXComponent', 'Registering sub-window controller with id: %{public}d', this.windowId);
+        // Apply transparent background/container color (window fully ready here).
+        try {
+          await WindowManager.getInstance().applyTransparentBackground(this.windowId);
+        } catch (e) {
+          hilog.warn(DOMAIN, 'DefaultXComponent', 'applyTransparentBackground failed: %{public}s', String(e));
+        }
+      } else {
+        // Float sub-window mode: register to WindowManager (no render)
+        hilog.info(DOMAIN, 'DefaultXComponent', 'Float sub-window: windowId=%{public}d', this.windowId);
         const wm = WindowManager.getInstance();
         wm.registerController(this.windowId, this.webviewController);
-        hilog.info(DOMAIN, 'DefaultXComponent', 'Sub-window controller registered');
+        hilog.info(DOMAIN, 'DefaultXComponent', 'Float sub-window controller registered');
       }
     } catch (err) {
       hilog.error(DOMAIN, 'DefaultXComponent', 'aboutToAppear FAILED: %{public}s', JSON.stringify(err));

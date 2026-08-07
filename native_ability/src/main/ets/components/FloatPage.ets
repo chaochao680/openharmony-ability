@@ -26,6 +26,11 @@ struct FloatPage {
   // Receive windowId from WindowManager.createSubWindow
   @LocalStorageProp('windowId') windowId: number = 0;
   @LocalStorageProp('decorations') decorations: boolean = true;
+  // D group: decoration button availability (all available by default). Written by WindowManager.setDecorationFlags.
+  @LocalStorageProp('closable') closable: boolean = true;
+  @LocalStorageProp('maximizable') maximizable: boolean = true;
+  @LocalStorageProp('minimizable') minimizable: boolean = true;
+  @LocalStorageProp('resizable') resizable: boolean = true;
   @StorageProp("__openharmony_ability_is_desktop__") isDesktop: boolean = false;
 
   // Window control
@@ -147,7 +152,7 @@ struct FloatPage {
                 .layoutWeight(1)
                 .height(40);
 
-              if (this.decorations) {
+              if (this.decorations && this.closable) {
                 Button() {
                   Image($r('sys.media.ohos_ic_public_cancel'))
                     .width(20)
@@ -213,7 +218,7 @@ struct FloatPage {
       .backgroundColor(Color.Transparent);
 
       // 3. Resize handles (on desktop, always available regardless of decorations)
-      if (this.isDesktop && this.windowClass) {
+      if (this.isDesktop && this.windowClass && this.resizable) {
         // Right edge resize handle
         Row() {}
           .width(10)

@@ -1,5 +1,6 @@
 use napi_ohos::bindgen_prelude::*;
 use napi_ohos::threadsafe_function::{ThreadsafeCallContext, ThreadsafeFunction, ThreadsafeFunctionCallMode};
+use napi_derive_ohos::napi;
 use napi_ohos::Env;
 use crate::{get_helper, get_main_thread_env};
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -148,8 +149,8 @@ pub fn set_window_decorations(window_id: i64, decorations: bool) -> napi_ohos::R
             })?;
 
             let func =
-                obj.get_named_property::<Function<'_, (i64, bool), ()>>("setWindowDecorations")?;
-            func.call((window_id, decorations))?;
+                obj.get_named_property::<Function<'_, FnArgs<(i64, bool)>, ()>>("setWindowDecorations")?;
+            func.call(FnArgs { data: (window_id, decorations) })?;
             return Ok(());
         } else {
             crate::error!("Main thread env not available");
@@ -292,8 +293,8 @@ pub fn set_window_focusable(window_id: i64, focusable: bool) -> napi_ohos::Resul
             })?;
 
             let func =
-                obj.get_named_property::<Function<'_, (i64, bool), ()>>("setWindowFocusable")?;
-            func.call((window_id, focusable))?;
+                obj.get_named_property::<Function<'_, FnArgs<(i64, bool)>, ()>>("setWindowFocusable")?;
+            func.call(FnArgs { data: (window_id, focusable) })?;
             return Ok(());
         } else {
             crate::error!("Main thread env not available");
@@ -429,6 +430,30 @@ pub fn show_window(window_id: i64) -> napi_ohos::Result<()> {
     Err(Error::from_reason("Helper or Env not initialized"))
 }
 
+/// Destroys/closes a window via ArkTS `closeWindow(windowId)`:
+/// - Float sub-window: `win.destroyWindow()` (real destroy, removes from screen).
+/// - UIAbility main window: `hideAbility()` (background, OHOS doesn't allow
+///   programmatic Ability kill; instance stays in recent tasks but becomes invisible).
+///
+/// This is the real OHOS window destruction — tao's `Window::close` is a no-op on
+/// OHOS (doesn't call destroyWindow), so `WebviewWindow::close()` removes the
+/// window from Rust's manager but leaves the system window visible on screen.
+/// Callers that need the system window actually gone must call this explicitly.
+pub fn destroy_window(window_id: i64) -> napi_ohos::Result<()> {
+    log::info!("[ohos-window] destroy_window wid={} ENTER (sync)", window_id);
+    let ret = unsafe { get_helper() };
+    if let Some(h) = ret.borrow().as_ref() {
+        if let Some(env) = get_main_thread_env().borrow().as_ref() {
+            let obj = h.get_value(env).map_err(|e| { crate::error!("Failed to get helper: {:?}", e); e })?;
+            let func = obj.get_named_property::<Function<'_, i64, ()>>("closeWindow")?;
+            func.call(window_id)?;
+            log::info!("[ohos-window] destroy_window wid={} ArkHelper.closeWindow called OK", window_id);
+            return Ok(());
+        } else { log::error!("[ohos-window] destroy_window wid={} Main thread env not available", window_id); }
+    } else { log::error!("[ohos-window] destroy_window wid={} Helper not initialized", window_id); }
+    Err(Error::from_reason("Helper or Env not initialized"))
+}
+
 /// Queries whether a window is maximized via ArkTS `isMaximized(windowId)` →
 /// `win.getWindowStatus() === window.WindowStatusType.MAXIMIZE`.
 /// Synchronous (getWindowStatus is a sync getter, API12).
@@ -457,4 +482,199 @@ pub fn is_window_minimized(window_id: i64) -> napi_ohos::Result<bool> {
         } else { crate::error!("Main thread env not available"); }
     } else { crate::error!("Helper object not initialized"); }
     Err(Error::from_reason("Helper or Env not initialized"))
+}
+
+// ─── Group A completion: hide / fullscreen / ignore cursor ──────────────────────────────
+// Multi-arg (2+) parameters must be wrapped with FnArgs (a bare tuple is
+// passed as a single argument; see napi-ohos JsValuesTupleIntoVec blanket
+// impl). Single-arg func.call(id) is unaffected.
+
+/// `set_visible(false)` → main window hideAbility; sub-window minimize (OHOS has no standalone hide API).
+pub fn hide_window(window_id: i64) -> napi_ohos::Result<()> {
+    let ret = unsafe { get_helper() };
+    if let Some(h) = ret.borrow().as_ref() {
+        if let Some(env) = get_main_thread_env().borrow().as_ref() {
+            let obj = h.get_value(env).map_err(|e| { crate::error!("Failed to get helper: {:?}", e); e })?;
+            let func = obj.get_named_property::<Function<'_, i64, ()>>("hideWindow")?;
+            func.call(window_id)?;
+            return Ok(());
+        } else { crate::error!("Main thread env not available"); }
+    } else { crate::error!("Helper object not initialized"); }
+    Err(Error::from_reason("Helper or Env not initialized"))
+}
+
+/// `set_fullscreen` → setWindowLayoutFullScreen + setWindowSystemBarEnable([]).
+pub fn set_fullscreen(window_id: i64, on: bool) -> napi_ohos::Result<()> {
+    log::info!("[ohos-window] set_fullscreen ENTER wid={} on={}", window_id, on);
+    let ret = unsafe { get_helper() };
+    if let Some(h) = ret.borrow().as_ref() {
+        if let Some(env) = get_main_thread_env().borrow().as_ref() {
+            let obj = h.get_value(env).map_err(|e| { crate::error!("Failed to get helper: {:?}", e); e })?;
+            let func = obj.get_named_property::<Function<'_, FnArgs<(i64, bool)>, ()>>("setFullscreen")?;
+            func.call(FnArgs { data: (window_id, on) })?;
+            log::info!("[ohos-window] set_fullscreen wid={} ArkHelper.setFullscreen called OK", window_id);
+            return Ok(());
+        } else { log::error!("[ohos-window] set_fullscreen wid={} Main thread env not available", window_id); }
+    } else { log::error!("[ohos-window] set_fullscreen wid={} Helper not initialized", window_id); }
+    Err(Error::from_reason("Helper or Env not initialized"))
+}
+
+/// `set_ignore_cursor_events` → setWindowTouchable (touchable = !ignore).
+pub fn set_window_touchable(window_id: i64, touchable: bool) -> napi_ohos::Result<()> {
+    let ret = unsafe { get_helper() };
+    if let Some(h) = ret.borrow().as_ref() {
+        if let Some(env) = get_main_thread_env().borrow().as_ref() {
+            let obj = h.get_value(env).map_err(|e| { crate::error!("Failed to get helper: {:?}", e); e })?;
+            let func = obj.get_named_property::<Function<'_, FnArgs<(i64, bool)>, ()>>("setWindowTouchable")?;
+            func.call(FnArgs { data: (window_id, touchable) })?;
+            return Ok(());
+        } else { crate::error!("Main thread env not available"); }
+    } else { crate::error!("Helper object not initialized"); }
+    Err(Error::from_reason("Helper or Env not initialized"))
+}
+
+// ─── Group D: decoration button availability (FloatPage LocalStorage) ──────────────────────────
+// Bitfield: bit0 closable, bit1 maximizable, bit2 minimizable, bit3 resizable.
+// Default 0b1111=15. Only effective for Float sub-windows; no-op for main window.
+pub fn set_window_decoration_flags(window_id: i64, flags: u8) -> napi_ohos::Result<()> {
+    let ret = unsafe { get_helper() };
+    if let Some(h) = ret.borrow().as_ref() {
+        if let Some(env) = get_main_thread_env().borrow().as_ref() {
+            let obj = h.get_value(env).map_err(|e| { crate::error!("Failed to get helper: {:?}", e); e })?;
+            let func = obj.get_named_property::<Function<'_, FnArgs<(i64, u8)>, ()>>("setWindowDecorationFlags")?;
+            func.call(FnArgs { data: (window_id, flags) })?;
+            return Ok(());
+        } else { crate::error!("Main thread env not available"); }
+    } else { crate::error!("Helper object not initialized"); }
+    Err(Error::from_reason("Helper or Env not initialized"))
+}
+
+// ─── Group E: cursor visibility / icon (@ohos.multimodalInput.pointer) ─────────────────
+/// `set_cursor_visible` → pointer.setPointerVisible (global).
+pub fn set_pointer_visible(visible: bool) -> napi_ohos::Result<()> {
+    let ret = unsafe { get_helper() };
+    if let Some(h) = ret.borrow().as_ref() {
+        if let Some(env) = get_main_thread_env().borrow().as_ref() {
+            let obj = h.get_value(env).map_err(|e| { crate::error!("Failed to get helper: {:?}", e); e })?;
+            let func = obj.get_named_property::<Function<'_, bool, ()>>("setPointerVisible")?;
+            func.call(visible)?;
+            return Ok(());
+        } else { crate::error!("Main thread env not available"); }
+    } else { crate::error!("Helper object not initialized"); }
+    Err(Error::from_reason("Helper or Env not initialized"))
+}
+
+/// `set_cursor_icon` → pointer.setPointerStyleSync(windowId, PointerStyle).
+/// `style` is an OHOS PointerStyle enum value (mapped from tao's CursorIcon).
+pub fn set_pointer_style(window_id: i64, style: i32) -> napi_ohos::Result<()> {
+    let ret = unsafe { get_helper() };
+    if let Some(h) = ret.borrow().as_ref() {
+        if let Some(env) = get_main_thread_env().borrow().as_ref() {
+            let obj = h.get_value(env).map_err(|e| { crate::error!("Failed to get helper: {:?}", e); e })?;
+            let func = obj.get_named_property::<Function<'_, FnArgs<(i64, i32)>, ()>>("setPointerStyle")?;
+            func.call(FnArgs { data: (window_id, style) })?;
+            return Ok(());
+        } else { crate::error!("Main thread env not available"); }
+    } else { crate::error!("Helper object not initialized"); }
+    Err(Error::from_reason("Helper or Env not initialized"))
+}
+
+/// Allocates the next global window ID without creating a window.
+///
+/// Used by tao when a subsequent UIAbility is created: tao
+/// pre-allocates an ID, passes it to the new EntryAbility instance via
+/// `want.parameters`, then calls `start_ui_ability`. The new instance's
+/// `onWindowStageCreate` registers its WindowStage against this ID via
+/// `register_ui_ability_stage`.
+pub fn next_window_id() -> i64 {
+    NEXT_WINDOW_ID.fetch_add(1, Ordering::SeqCst)
+}
+
+/// Starts a new EntryAbility instance to host a window.
+///
+/// OHOS `context.startAbility(want)` with `abilityName: "EntryAbility"` creates
+/// a new instance of the same EntryAbility class (requires `launchType: standard`
+/// in module.json5). Each instance gets an independent WindowStage / main window /
+/// lifecycle. `windowId` is pre-allocated by tao and carried via `want.parameters`
+/// so the new instance can register its WindowStage against it.
+///
+/// Returns immediately (startAbility is async); the new instance's
+/// `onWindowStageCreate` will call back to register its stage. tao returns
+/// `window_id = Some(id)` right away so wry/WebView creation can proceed — the
+/// `ProxyJsHelper` queue handles the race until the controller is ready.
+pub fn start_ui_ability(
+    window_id: i64,
+    label: String,
+    url: String,
+    multiton: bool,
+    transparent: bool,
+) -> napi_ohos::Result<()> {
+    // The ability name is fixed to "EntryAbility" here — tao (the only caller)
+    // does not need to pass it. openharmony-ability owns this decision so the
+    // ability class name stays a single source of truth.
+    let ability_name = "EntryAbility".to_string();
+    crate::info!(
+        "start_ui_ability: id={}, label={}, ability={}, multiton={}, transparent={}",
+        window_id, label, ability_name, multiton, transparent
+    );
+
+    let ret = unsafe { get_helper() };
+    if let Some(h) = ret.borrow().as_ref() {
+        if let Some(env) = get_main_thread_env().borrow().as_ref() {
+            let obj = h.get_value(env).map_err(|e| {
+                crate::error!("Failed to get helper object value: {:?}", e);
+                e
+            })?;
+
+            let func = obj.get_named_property::<Function<'_, Object, ()>>("startUIAbility")
+                .map_err(|e| {
+                    crate::error!("Property 'startUIAbility' NOT FOUND on helper: {:?}", e);
+                    e
+                })?;
+
+            // Build the want parameter object. ArkTS startUIAbility reads these
+            // and calls context.startAbility({abilityName, parameters: {...}}).
+            let mut want = Object::new(env)?;
+            want.set("abilityName", ability_name)?;
+            want.set("windowId", window_id)?;
+            want.set("label", label)?;
+            want.set("url", url)?;
+            want.set("multiton", multiton)?;
+            want.set("transparent", transparent)?;
+
+            func.call(want)?;
+            return Ok(());
+        } else {
+            crate::error!("Main thread env not available");
+        }
+    } else {
+        crate::error!("Helper object not initialized");
+    }
+    Err(Error::from_reason("Helper or Env not initialized"))
+}
+
+/// Global record of the last windowId reported by a subsequent EntryAbility
+/// instance via `register_ui_ability_stage`. Used by automated tests
+/// (get_last_ui_ability_window_id command) to verify that want.parameters
+/// survived the startAbility call to the new instance.
+static LAST_UI_ABILITY_WINDOW_ID: AtomicI64 = AtomicI64::new(-1);
+
+/// NAPI: Called by the new EntryAbility instance's `onWindowStageCreate` (via
+/// ArkTS `WindowManager.registerUIAbilityStage`) to report the windowId
+/// it received from want.parameters. Records the id globally so automated tests
+/// can poll `get_last_ui_ability_window_id` and verify want-parameter forwarding.
+#[napi]
+pub fn register_ui_ability_stage(window_id: i64) {
+    crate::info!(
+        "register_ui_ability_stage: id={} (ArkTS-side registration triggered replay)",
+        window_id
+    );
+    LAST_UI_ABILITY_WINDOW_ID.store(window_id, Ordering::SeqCst);
+}
+
+/// Reads the last windowId reported by a subsequent instance. Returns -1 if no
+/// subsequent instance has registered yet. Used by automated tests.
+#[napi]
+pub fn get_last_ui_ability_window_id() -> i64 {
+    LAST_UI_ABILITY_WINDOW_ID.load(Ordering::SeqCst)
 }
