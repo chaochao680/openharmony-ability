@@ -305,10 +305,100 @@ pub fn set_window_focusable(window_id: i64, focusable: bool) -> napi_ohos::Resul
     Err(Error::from_reason("Helper or Env not initialized"))
 }
 
-// ============================================================================
-// Window operations (ohos-window-ops)
-// Fire-and-forget (dispatch async Promise, return Ok(()) immediately),
-// mirroring focus_window. is_window_maximized/is_window_minimized are
+/// Sets window topmost via ArkTS `setWindowTopmost(windowId, topmost)` → `win.setWindowTopmost(bool)`.
+///
+/// OHOS API 14+. **Main window only** — Float sub-windows will error (caught + warned in
+/// ArkTS, non-fatal). Only effective in freeform window mode; returns 801 on devices
+/// without freeform support (phone/tablet) — caught + warned.
+/// Requires `ohos.permission.WINDOW_TOPMOST` (system_grant, declared in module.json5).
+pub fn set_window_topmost(window_id: i64, topmost: bool) -> napi_ohos::Result<()> {
+    let ret = unsafe { get_helper() };
+    if let Some(h) = ret.borrow().as_ref() {
+        if let Some(env) = get_main_thread_env().borrow().as_ref() {
+            let obj = h.get_value(env).map_err(|e| {
+                crate::error!("Failed to get helper object value: {:?}", e);
+                e
+            })?;
+
+            let func =
+                obj.get_named_property::<Function<'_, FnArgs<(i64, bool)>, ()>>("setWindowTopmost")?;
+            func.call(FnArgs { data: (window_id, topmost) })?;
+            return Ok(());
+        } else {
+            crate::error!("Main thread env not available");
+        }
+    } else {
+        crate::error!("Helper object not initialized");
+    }
+    Err(Error::from_reason("Helper or Env not initialized"))
+}
+
+/// Sets window title via ArkTS `setWindowTitle(windowId, title)` → `win.setWindowTitle(title)`.
+///
+/// OHOS API 9+ (callback form) / API 12+ (decor title field). Main window and Float
+/// sub-windows both support title text (icon is NOT changeable at runtime). No extra
+/// permission for main window; Float sub-window creation already needs SYSTEM_FLOAT_WINDOW.
+/// Uses Object param (not FnArgs) because the title is a String — matches start_ui_ability pattern.
+pub fn set_window_title(window_id: i64, title: String) -> napi_ohos::Result<()> {
+    let ret = unsafe { get_helper() };
+    if let Some(h) = ret.borrow().as_ref() {
+        if let Some(env) = get_main_thread_env().borrow().as_ref() {
+            let obj = h.get_value(env).map_err(|e| {
+                crate::error!("Failed to get helper object value: {:?}", e);
+                e
+            })?;
+
+            let func = obj.get_named_property::<Function<'_, Object, ()>>("setWindowTitle")?;
+            let mut args = Object::new(env)?;
+            args.set("windowId", window_id)?;
+            args.set("title", title)?;
+            func.call(args)?;
+            return Ok(());
+        } else {
+            crate::error!("Main thread env not available");
+        }
+    } else {
+        crate::error!("Helper object not initialized");
+    }
+    Err(Error::from_reason("Helper or Env not initialized"))
+}
+
+/// Sets window min/max size limits via ArkTS `setWindowLimits(windowId, minW, minH, maxW, maxH)`
+/// → `win.setWindowLimits({minWindowWidth, minWindowHeight, maxWindowWidth, maxWindowHeight})`.
+///
+/// OHOS API 11+. All four params are u32 (px). None = 0 means "no limit" (system default).
+/// ⚠️ Triggers OnSizeChange — may cause appfreeze if called frequently on main window.
+/// No extra permission. Uses FnArgs (all numeric, safe for sync NAPI).
+pub fn set_window_limits(
+    window_id: i64,
+    min_w: u32,
+    min_h: u32,
+    max_w: u32,
+    max_h: u32,
+) -> napi_ohos::Result<()> {
+    let ret = unsafe { get_helper() };
+    if let Some(h) = ret.borrow().as_ref() {
+        if let Some(env) = get_main_thread_env().borrow().as_ref() {
+            let obj = h.get_value(env).map_err(|e| {
+                crate::error!("Failed to get helper object value: {:?}", e);
+                e
+            })?;
+
+            let func = obj.get_named_property::<
+                Function<'_, FnArgs<(i64, u32, u32, u32, u32)>, ()>,
+            >("setWindowLimits")?;
+            func.call(FnArgs {
+                data: (window_id, min_w, min_h, max_w, max_h),
+            })?;
+            return Ok(());
+        } else {
+            crate::error!("Main thread env not available");
+        }
+    } else {
+        crate::error!("Helper object not initialized");
+    }
+    Err(Error::from_reason("Helper or Env not initialized"))
+}
 // synchronous queries returning bool via getWindowStatus().
 // ============================================================================
 
@@ -564,7 +654,62 @@ pub fn set_pointer_visible(visible: bool) -> napi_ohos::Result<()> {
     Err(Error::from_reason("Helper or Env not initialized"))
 }
 
-/// `set_cursor_icon` → pointer.setPointerStyleSync(windowId, PointerStyle).
+/// Request window redraw (no-op on OHOS — vsync auto-drives rendering).
+pub fn request_redraw(window_id: i64) -> napi_ohos::Result<()> {
+    let ret = unsafe { get_helper() };
+    if let Some(h) = ret.borrow().as_ref() {
+        if let Some(env) = get_main_thread_env().borrow().as_ref() {
+            let obj = h.get_value(env).map_err(|e| { crate::error!("...: {:?}", e); e })?;
+            let func = obj.get_named_property::<Function<'_, FnArgs<(i64,)>, ()>>("requestRedraw")?;
+            func.call(FnArgs { data: (window_id,) })?;
+            return Ok(());
+        }
+    }
+    Err(Error::from_reason("Helper or Env not initialized"))
+}
+
+/// Request user attention via notificationManager (no window-level API).
+pub fn request_user_attention() -> napi_ohos::Result<()> {
+    let ret = unsafe { get_helper() };
+    if let Some(h) = ret.borrow().as_ref() {
+        if let Some(env) = get_main_thread_env().borrow().as_ref() {
+            let obj = h.get_value(env).map_err(|e| { crate::error!("...: {:?}", e); e })?;
+            let func = obj.get_named_property::<Function<'_, (), ()>>("requestUserAttention")?;
+            func.call(())?;
+            return Ok(());
+        }
+    }
+    Err(Error::from_reason("Helper or Env not initialized"))
+}
+
+/// Set IME cursor position via inputMethod.updateCursor(CursorInfo). API 10+.
+/// Requires a focused edit box in the window, else ArkTS catches 12800003.
+pub fn set_ime_position(window_id: i64, x: i64, y: i64) -> napi_ohos::Result<()> {
+    let ret = unsafe { get_helper() };
+    if let Some(h) = ret.borrow().as_ref() {
+        if let Some(env) = get_main_thread_env().borrow().as_ref() {
+            let obj = h.get_value(env).map_err(|e| { crate::error!("...: {:?}", e); e })?;
+            let func = obj.get_named_property::<Function<'_, FnArgs<(i64, i64, i64)>, ()>>("setImePosition")?;
+            func.call(FnArgs { data: (window_id, x, y,) })?;
+            return Ok(());
+        }
+    }
+    Err(Error::from_reason("Helper or Env not initialized"))
+}
+
+/// Enable/disable window edge drag-resize (enableDrag API20+).
+pub fn set_window_draggable(window_id: i64, enable: bool) -> napi_ohos::Result<()> {
+    let ret = unsafe { get_helper() };
+    if let Some(h) = ret.borrow().as_ref() {
+        if let Some(env) = get_main_thread_env().borrow().as_ref() {
+            let obj = h.get_value(env).map_err(|e| { crate::error!("...: {:?}", e); e })?;
+            let func = obj.get_named_property::<Function<'_, FnArgs<(i64, bool)>, ()>>("setWindowDraggable")?;
+            func.call(FnArgs { data: (window_id, enable,) })?;
+            return Ok(());
+        }
+    }
+    Err(Error::from_reason("Helper or Env not initialized"))
+}
 /// `style` is an OHOS PointerStyle enum value (mapped from tao's CursorIcon).
 pub fn set_pointer_style(window_id: i64, style: i32) -> napi_ohos::Result<()> {
     let ret = unsafe { get_helper() };
@@ -641,6 +786,8 @@ pub fn start_ui_ability(
             want.set("url", url)?;
             want.set("multiton", multiton)?;
             want.set("transparent", transparent)?;
+            // instanceKey: unique per call → onAcceptWant returns unique key → new instance
+            want.set("instanceKey", format!("win-{}", window_id))?;
 
             func.call(want)?;
             return Ok(());
@@ -653,7 +800,6 @@ pub fn start_ui_ability(
     Err(Error::from_reason("Helper or Env not initialized"))
 }
 
-/// Global record of the last windowId reported by a subsequent EntryAbility
 /// instance via `register_ui_ability_stage`. Used by automated tests
 /// (get_last_ui_ability_window_id command) to verify that want.parameters
 /// survived the startAbility call to the new instance.

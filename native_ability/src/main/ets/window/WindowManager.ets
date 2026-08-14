@@ -1,5 +1,5 @@
 import { window, UIContext } from '@kit.ArkUI';
-import { common } from '@kit.AbilityKit';
+import { common, Want } from '@kit.AbilityKit';
 import pointer from '@ohos.multimodalInput.pointer';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { deviceInfo } from '@kit.BasicServicesKit';
@@ -305,6 +305,11 @@ export class WindowManager {
   // that make a window invisible (minimize/hide/close).
 
   minimizeWindow(windowId: number): void {
+    // 拦截:FLAG_MINIMIZABLE 为 0 时,不允许最小化(问题四:语义错位修复)
+    if (!this.getDecorationFlag(windowId, 'minimizable')) {
+      hilog.warn(DOMAIN, 'WindowManager', 'minimizeWindow blocked: minimizable flag not set (window %{public}d)', windowId);
+      return;
+    }
     const win = this.getWindow(windowId);
     if (!win) {
       hilog.warn(DOMAIN, 'WindowManager', 'minimizeWindow: window %{public}d not found', windowId);
@@ -370,10 +375,72 @@ export class WindowManager {
   }
 
   maximizeWindow(windowId: number): void {
+    // 拦截:FLAG_MAXIMIZABLE 为 0 时,不允许最大化(问题四:语义错位修复)
+    if (!this.getDecorationFlag(windowId, 'maximizable')) {
+      hilog.warn(DOMAIN, 'WindowManager', 'maximizeWindow blocked: maximizable flag not set (window %{public}d)', windowId);
+      return;
+    }
     const win = this.getWindow(windowId);
     if (!win) { hilog.warn(DOMAIN, 'WindowManager', 'maximizeWindow: window %{public}d not found', windowId); return; }
     win.maximize(window.MaximizePresentation.EXIT_IMMERSIVE).catch((err: ESObject) => {
       hilog.error(DOMAIN, 'WindowManager', 'maximizeWindow failed: %{public}s', JSON.stringify(err));
+    });
+  }
+
+  setWindowTopmost(windowId: number, topmost: boolean): void {
+    // win.setWindowTopmost() is API14+. Requires ohos.permission.WINDOW_TOPMOST
+    // (system_grant, declared in module.json5). Main window only — Float sub-windows
+    // will error (non-fatal). Only effective in freeform window mode; returns 801
+    // on devices without freeform support (phone/tablet).
+    if (deviceInfo.sdkApiVersion < 14) {
+      hilog.warn(DOMAIN, 'WindowManager', 'setWindowTopmost: API14+ required, current %{public}d; no-op', deviceInfo.sdkApiVersion);
+      return;
+    }
+    const win = this.getWindow(windowId);
+    if (!win) { hilog.warn(DOMAIN, 'WindowManager', 'setWindowTopmost: window %{public}d not found', windowId); return; }
+    win.setWindowTopmost(topmost).then(() => {
+      hilog.info(DOMAIN, 'WindowManager', 'setWindowTopmost %{public}d topmost=%{public}s OK', windowId, String(topmost));
+    }).catch((err: ESObject) => {
+      // 801: non-freeform device/state; sub-window call; 1300002: window state abnormal — non-fatal
+      hilog.warn(DOMAIN, 'WindowManager', 'setWindowTopmost %{public}d failed: %{public}s', windowId, JSON.stringify(err));
+    });
+  }
+
+  setWindowTitle(windowId: number, title: string): void {
+    // win.setWindowTitle(title) is Promise form (1 arg). Main window + Float sub-windows
+    // both support title text (icon is NOT changeable at runtime). No extra permission
+    // for main window. Only visible when window decorations are enabled (decorEnabled=true).
+    const win = this.getWindow(windowId);
+    if (!win) { hilog.warn(DOMAIN, 'WindowManager', 'setWindowTitle: window %{public}d not found', windowId); return; }
+    // Also update LocalStorage 'title' so FloatPage @LocalStorageProp('title') refreshes the title bar text.
+    const entry = this.windows.get(windowId);
+    if (entry?.storage) {
+      entry.storage.setOrCreate('title', title);
+    }
+    win.setWindowTitle(title).then(() => {
+      hilog.info(DOMAIN, 'WindowManager', 'setWindowTitle %{public}d title="%{public}s" OK', windowId, title);
+    }).catch((err: ESObject) => {
+      hilog.warn(DOMAIN, 'WindowManager', 'setWindowTitle %{public}d failed: %{public}s', windowId, JSON.stringify(err));
+    });
+  }
+
+  setWindowLimits(windowId: number, minW: number, minH: number, maxW: number, maxH: number): void {
+    // win.setWindowLimits() is API11+. Params are px (0 = no limit / system default).
+    // WindowLimits fields: minWidth/minHeight/maxWidth/maxHeight (NOT minWindowWidth etc.)
+    // ⚠️ Triggers OnSizeChange — caller must not invoke frequently on main window (appfreeze risk).
+    const win = this.getWindow(windowId);
+    if (!win) { hilog.warn(DOMAIN, 'WindowManager', 'setWindowLimits: window %{public}d not found', windowId); return; }
+    const limits: window.WindowLimits = {
+      minWidth: minW,
+      minHeight: minH,
+      maxWidth: maxW,
+      maxHeight: maxH,
+    };
+    win.setWindowLimits(limits).then((actual: window.WindowLimits) => {
+      hilog.info(DOMAIN, 'WindowManager', 'setWindowLimits %{public}d OK: min=%{public}dx%{public}d max=%{public}dx%{public}d',
+        windowId, actual.minWidth, actual.minHeight, actual.maxWidth, actual.maxHeight);
+    }).catch((err: ESObject) => {
+      hilog.warn(DOMAIN, 'WindowManager', 'setWindowLimits %{public}d failed: %{public}s', windowId, JSON.stringify(err));
     });
   }
 
@@ -401,26 +468,54 @@ export class WindowManager {
   }
 
   showWindowMethod(windowId: number): void {
-    const win = this.getWindow(windowId);
-    if (!win) { hilog.warn(DOMAIN, 'WindowManager', 'showWindowMethod: window %{public}d not found', windowId); return; }
-    win.showWindow().catch((err: ESObject) => {
-      hilog.error(DOMAIN, 'WindowManager', 'showWindowMethod failed: %{public}s', JSON.stringify(err));
-    });
-  }
-
-  // hide: UIAbility main window uses hideAbility; Float sub-window uses minimize
-  // (OHOS has no standalone hideWindow API).
-  // TODO(遗留问题三): hideAbility 仅 UIAbility 可用且需状态栏前置条件;Float 用 minimize
-  //   冒充(语义不符,is_minimized 误报 true);show/hide 不对称(主窗口 hide 后 show 无法恢复)。
-  //   详见 doc/OHOS窗口遗留问题.md(问题三)。
-  hideWindow(windowId: number): void {
+    // UIAbility main window: hideAbility sent app to background; showWindow cannot restore.
+    // Use startAbility with instanceKey='main' → onAcceptWant returns 'main' → system reuses
+    // existing instance (specified launchType, no new instance, no window explosion).
     if (this.isUIAbilityMainWindow(windowId)) {
-      this.hideAbility();
+      this.showMainAbility();
       return;
     }
     const win = this.getWindow(windowId);
+    if (!win) { hilog.warn(DOMAIN, 'WindowManager', 'showWindowMethod: window %{public}d not found', windowId); return; }
+    win.showWindow().then(() => {
+      hilog.info(DOMAIN, 'WindowManager', 'showWindowMethod %{public}d OK', windowId);
+    }).catch((err: ESObject) => {
+      hilog.warn(DOMAIN, 'WindowManager', 'showWindowMethod %{public}d failed: %{public}s', windowId, JSON.stringify(err));
+    });
+  }
+
+  // Bring main Ability back to foreground via startAbility(instanceKey='main').
+  // onAcceptWant returns 'main' → system reuses existing instance (specified launchType).
+  showMainAbility(): void {
+    if (!this.context) {
+      hilog.warn(DOMAIN, 'WindowManager', 'showMainAbility: context not set');
+      return;
+    }
+    try {
+      const want: Want = {
+        bundleName: this.context.applicationInfo.name,
+        abilityName: 'EntryAbility',
+        parameters: { 'instanceKey': 'main' } as Record<string, Object>,
+      };
+      this.context.startAbility(want).then(() => {
+        hilog.info(DOMAIN, 'WindowManager', 'showMainAbility(startAbility instanceKey=main) OK');
+      }).catch((err: ESObject) => {
+        hilog.warn(DOMAIN, 'WindowManager', 'showMainAbility failed: %{public}s', JSON.stringify(err));
+      });
+    } catch (err) {
+      hilog.warn(DOMAIN, 'WindowManager', 'showMainAbility exception: %{public}s', String(err));
+    }
+  }
+
+  // hide: main window uses win.minimize() (hideAbility not supported on PC/2in1 — StartOptions check failed).
+  // show: main window uses startAbility(instanceKey='main') → onAcceptWant reuses existing instance.
+  // Sub-window: minimize + showWindow (symmetric, works).
+  hideWindow(windowId: number): void {
+    const win = this.getWindow(windowId);
     if (!win) { this.logNotFound('hideWindow', windowId); return; }
-    win.minimize().catch((err: ESObject) => {
+    win.minimize().then(() => {
+      hilog.info(DOMAIN, 'WindowManager', 'hideWindow(minimize) %{public}d OK', windowId);
+    }).catch((err: ESObject) => {
       hilog.warn(DOMAIN, 'WindowManager', 'hideWindow(minimize) %{public}d failed: %{public}s', windowId, JSON.stringify(err));
     });
   }
@@ -471,6 +566,18 @@ export class WindowManager {
   // Group D decoration button bitfield: bit0 closable, bit1 maximizable, bit2 minimizable, bit3 resizable.
   // Only applies to Float sub-windows (writes LocalStorage); UIAbility main window is a no-op
   // (decorations are system-provided).
+  // Read a decoration flag from LocalStorage (问题四: 拦截 API 执行路径)
+  // key: 'closable' | 'maximizable' | 'minimizable' | 'resizable'
+  // Returns true if not set (default = all available, backward compatible)
+  getDecorationFlag(windowId: number, key: string): boolean {
+    const entry = this.windows.get(windowId);
+    if (!entry || !entry.storage) {
+      return true;  // default: allowed (no storage = main window or not yet initialized)
+    }
+    const val = entry.storage.get<boolean>(key);
+    return val === undefined ? true : val;
+  }
+
   setDecorationFlags(windowId: number, flags: number): void {
     if (this.isUIAbilityMainWindow(windowId)) {
       hilog.info(DOMAIN, 'WindowManager', 'setDecorationFlags: UIAbility main window (id=%{public}d) no-op', windowId);
@@ -494,8 +601,15 @@ export class WindowManager {
   }
 
   setPointerStyle(windowId: number, style: number): void {
-    try { pointer.setPointerStyleSync(windowId, style as pointer.PointerStyle); }
-    catch (err) { hilog.warn(DOMAIN, 'WindowManager', 'setPointerStyle %{public}d failed: %{public}s', windowId, JSON.stringify(err)); }
+    // pointer.setPointerStyleSync needs the REAL OHOS window ID (from getWindowProperties().id),
+    // not tao's placeholder windowId (0 for main window). Passing 0 succeeds but has no effect.
+    const win = this.getWindow(windowId);
+    if (!win) { hilog.warn(DOMAIN, 'WindowManager', 'setPointerStyle: window %{public}d not found', windowId); return; }
+    try {
+      const realWindowId = win.getWindowProperties().id;
+      pointer.setPointerStyleSync(realWindowId, style as pointer.PointerStyle);
+      hilog.info(DOMAIN, 'WindowManager', 'setPointerStyle taoId=%{public}d realId=%{public}d style=%{public}d OK', windowId, realWindowId, style);
+    } catch (err) { hilog.warn(DOMAIN, 'WindowManager', 'setPointerStyle %{public}d failed: %{public}s', windowId, JSON.stringify(err)); }
   }
 
   isMaximized(windowId: number): boolean {
@@ -513,6 +627,11 @@ export class WindowManager {
   // Destroy a window and clean up all resources.
   // Works for both main window (id=0) and sub-windows.
   async destroyWindow(windowId: number): Promise<void> {
+    // 拦截:FLAG_CLOSABLE 为 0 时,不允许关闭(问题四:语义错位修复)
+    if (!this.getDecorationFlag(windowId, 'closable')) {
+      hilog.warn(DOMAIN, 'WindowManager', 'destroyWindow blocked: closable flag not set (window %{public}d)', windowId);
+      return;
+    }
     const win = this.getWindow(windowId);
     if (!win) {
       hilog.warn(DOMAIN, 'WindowManager', 'destroyWindow: window %{public}d not found', windowId);
@@ -687,6 +806,13 @@ export class WindowManager {
     let storage = new LocalStorage();
     storage.setOrCreate('windowId', windowId);
     storage.setOrCreate('decorations', decorations);
+    // D group decoration flags default (all available; setDecorationFlags updates them)
+    storage.setOrCreate('closable', true);
+    storage.setOrCreate('maximizable', true);
+    storage.setOrCreate('minimizable', true);
+    storage.setOrCreate('resizable', true);
+    // Title (set by setWindowTitle → updates this via setWindowTitle impl)
+    storage.setOrCreate('title', '');
     this.windows.set(windowId, { window: win, storage });
 
     // Register focus tracking for sub-window

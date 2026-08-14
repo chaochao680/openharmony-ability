@@ -140,12 +140,13 @@ export interface AccountInfo {
 // Want params for starting a new EntryAbility instance (multi-UIAbility-instance path).
 // Rust NAPI (start_ui_ability) builds this object and passes it to ArkHelper.startUIAbility.
 export interface UIAbilityWantParams {
-  abilityName: string;       // "EntryAbility" — reuse same class, new instance via launchType:standard
+  abilityName: string;       // "EntryAbility" — reuse same class, new instance via launchType:specified
   windowId: number;          // Rust-pre-allocated id (NEXT_WINDOW_ID), carried in want.parameters
   label: string;             // window label, for debugging / routing
   url: string;               // initial URL to load in the new instance's webview
   multiton: boolean;         // reserved: true=standard (new instance each call), false=singleton (onNewWant)
   transparent: boolean;      // if true, new instance sets setWindowContainerColor transparent on its main window
+  instanceKey?: string;      // specified launchType: 'main'=reuse main instance, unique= new instance
 }
 
 export interface ArkHelper {
@@ -165,6 +166,9 @@ export interface ArkHelper {
   startUIAbility: (want: UIAbilityWantParams) => void;
   setWindowDecorations: (windowId: number, decorations: boolean) => void;
   setWindowBackgroundColor: (windowId: number, color: number) => void;
+  setWindowTopmost: (windowId: number, topmost: boolean) => void;
+  setWindowTitle: (args: ESObject) => void;
+  setWindowLimits: (windowId: number, minW: number, minH: number, maxW: number, maxH: number) => void;
   focusWindow: (windowId: number) => void;
   setWindowFocusable: (windowId: number, focusable: boolean) => void;
   moveWindowTo: (windowId: number, x: number, y: number) => void;
@@ -186,6 +190,14 @@ export interface ArkHelper {
   setPointerVisible: (visible: boolean) => void;
   setPointerStyle: (windowId: number, style: number) => void;
   loadUrl: (id: number, url: string) => void;
+  // 请求重绘 — OHOS vsync 自动驱动,此调用为 no-op log
+  requestRedraw: (windowId: number) => void;
+  // 用户注意力请求 — 通过 notificationManager 发通知(非任务栏闪烁)
+  requestUserAttention: () => void;
+  // IME 位置 — 通过 inputMethod 通知光标位置
+  setImePosition: (windowId: number, x: number, y: number) => void;
+  // 拖拽缩放 — enableDrag 允许/禁止窗口边缘拖拽缩放
+  setWindowDraggable: (windowId: number, enable: boolean) => void;
   createMenu?: (options: MenuCreateOptions) => Promise<string>;
   createMenuItem?: (options: MenuItemCreateOptions) => Promise<string>;
   createSubmenu?: (options: SubmenuCreateOptions) => Promise<string>;

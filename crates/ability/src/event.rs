@@ -30,6 +30,11 @@ pub enum Event<'a> {
     /// https://developer.huawei.com/consumer/cn/doc/harmonyos-references/arkts-apis-window-window#onavoidareachange9
     AvoidAreaChange(AvoidAreaInfo),
 
+    /// fold display mode change event (folding screen fold/unfold)
+    /// alias display.on("foldDisplayModeChange")
+    /// https://developer.huawei.com/consumer/cn/doc/harmonyos-references/js-apis-display#onfolddisplaymodechange9
+    FoldDisplayModeChange(i32),
+
     /// window configuration changed
     /// alias onWindowConfigurationChanged
     /// https://developer.huawei.com/consumer/cn/doc/harmonyos-references-V5/js-apis-app-ability-environmentcallback-V5#environmentcallbackonconfigurationupdated
@@ -107,6 +112,7 @@ impl<'a> Event<'a> {
             Event::WindowResize(_) => "WindowResize",
             Event::ContentRectChange(_) => "ContentRectChange",
             Event::AvoidAreaChange(_) => "AvoidAreaChange",
+            Event::FoldDisplayModeChange(_) => "FoldDisplayModeChange",
             Event::ConfigChanged(_) => "ConfigChanged",
             Event::LowMemory => "LowMemory",
             Event::Start => "Start",
