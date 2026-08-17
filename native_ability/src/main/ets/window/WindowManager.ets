@@ -1,5 +1,5 @@
 import { window, UIContext } from '@kit.ArkUI';
-import { common, Want } from '@kit.AbilityKit';
+import { common } from '@kit.AbilityKit';
 import pointer from '@ohos.multimodalInput.pointer';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { deviceInfo } from '@kit.BasicServicesKit';
@@ -468,13 +468,23 @@ export class WindowManager {
   }
 
   showWindowMethod(windowId: number): void {
-    // UIAbility main window: hideAbility sent app to background; showWindow cannot restore.
-    // Use startAbility with instanceKey='main' → onAcceptWant returns 'main' → system reuses
-    // existing instance (specified launchType, no new instance, no window explosion).
+    // UIAbility main window: hideWindow did win.minimize() → window is in MINIMIZE state.
+    // showWindow() cannot restore from MINIMIZE (it only shows a hidden window / raises an
+    // already-shown main window to the top). The documented inverse of minimize() for the
+    // main window is restore() (the minimize() API doc links restore() for restoration;
+    // API14+, guarded inside restoreWindow). This replaces the prior
+    // startAbility(instanceKey='main') path: under launchType "standard" (tauri-cli
+    // template) instanceKey is ignored and every startAbility spawns a DUPLICATE
+    // EntryAbility. The demo masked this (its module.json5 omits launchType → singleton →
+    // onNewWant). Restore only when actually minimized so a redundant set_visible(true) on
+    // a visible maximized window does not un-maximize it. (PR#45 review F3/D)
     if (this.isUIAbilityMainWindow(windowId)) {
-      this.showMainAbility();
+      if (this.isMinimized(windowId)) {
+        this.restoreWindow(windowId);
+      }
       return;
     }
+    // Sub-window: showWindow() restores from minimize (symmetric with hideWindow's minimize).
     const win = this.getWindow(windowId);
     if (!win) { hilog.warn(DOMAIN, 'WindowManager', 'showWindowMethod: window %{public}d not found', windowId); return; }
     win.showWindow().then(() => {
@@ -484,31 +494,8 @@ export class WindowManager {
     });
   }
 
-  // Bring main Ability back to foreground via startAbility(instanceKey='main').
-  // onAcceptWant returns 'main' → system reuses existing instance (specified launchType).
-  showMainAbility(): void {
-    if (!this.context) {
-      hilog.warn(DOMAIN, 'WindowManager', 'showMainAbility: context not set');
-      return;
-    }
-    try {
-      const want: Want = {
-        bundleName: this.context.applicationInfo.name,
-        abilityName: 'EntryAbility',
-        parameters: { 'instanceKey': 'main' } as Record<string, Object>,
-      };
-      this.context.startAbility(want).then(() => {
-        hilog.info(DOMAIN, 'WindowManager', 'showMainAbility(startAbility instanceKey=main) OK');
-      }).catch((err: ESObject) => {
-        hilog.warn(DOMAIN, 'WindowManager', 'showMainAbility failed: %{public}s', JSON.stringify(err));
-      });
-    } catch (err) {
-      hilog.warn(DOMAIN, 'WindowManager', 'showMainAbility exception: %{public}s', String(err));
-    }
-  }
-
   // hide: main window uses win.minimize() (hideAbility not supported on PC/2in1 — StartOptions check failed).
-  // show: main window uses startAbility(instanceKey='main') → onAcceptWant reuses existing instance.
+  // show: main window uses restore() — the documented inverse of minimize() (see showWindowMethod).
   // Sub-window: minimize + showWindow (symmetric, works).
   hideWindow(windowId: number): void {
     const win = this.getWindow(windowId);

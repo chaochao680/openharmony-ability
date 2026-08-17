@@ -63,6 +63,10 @@ export function createArkHelper(): ArkHelper {
   // Per-window EmbeddedWebviewManager instances, keyed by windowId
   const embeddedManagers: Map<number, EmbeddedWebviewManager> = new Map();
 
+  // Monotonic notification id for requestUserAttention — avoids concurrent calls sharing a
+  // fixed id and overwriting each other (PR#45 review F3). See requestUserAttention.
+  let attentionNotifId: number = 0;
+
   const getEmbeddedManager = (windowId: number): EmbeddedWebviewManager => {
     if (!embeddedManagers.has(windowId)) {
       const wm = WindowManager.getInstance();
@@ -747,23 +751,27 @@ export function createArkHelper(): ArkHelper {
       // OHOS 窗口层无 requestAttention API。通过 notificationManager 发通知实现类似效果。
       // 必须用静态 import 的 notificationManager — 动态 import('@kit.NotificationKit')
       // 在设备上加载 native so 失败(libnotificationkit.z.so not exist)。
+      // 通知 id:用闭包内单调递增计数器,避免并发调用共用固定 id:1 导致后调用覆盖前者
+      // (PR#45 review F3)。tao 侧 request_user_attention 未透传 windowId,故此处无法按窗口
+      // 分配 id(那需要 tao→ability crate→ArkTS 全链路加 windowId 形参)。
+      const notifId = ++attentionNotifId;
       try {
         const doPublish = () => {
           notificationManager.publish({
-            id: 1,
+            id: notifId,
             content: {
               contentType: notificationManager.ContentType.NOTIFICATION_CONTENT_BASIC_TEXT,
               normal: { title: 'Tauri App', text: '请查看应用窗口' as string },
             } as ESObject,
           } as ESObject).then(() => {
-            hilog.info(DOMAIN, 'ArkHelper', 'requestUserAttention: notification published OK');
+            hilog.info(DOMAIN, 'ArkHelper', 'requestUserAttention: notification published OK (id=%{public}d)', notifId);
           }).catch((err: ESObject) => {
             const code = (err && (err as ESObject).code) ? (err as ESObject).code : -1;
-            hilog.warn(DOMAIN, 'ArkHelper', 'requestUserAttention: publish failed code=%{public}s: %{public}s', String(code), JSON.stringify(err));
+            hilog.warn(DOMAIN, 'ArkHelper', 'requestUserAttention: publish failed id=%{public}d code=%{public}s: %{public}s', notifId, String(code), JSON.stringify(err));
             // 1600004 = 通知未授权 → 弹系统授权弹窗(requestEnableNotification)
             if (code === 1600004) {
               notificationManager.requestEnableNotification().then(() => {
-                hilog.info(DOMAIN, 'ArkHelper', 'requestUserAttention: notification enabled, retry publish');
+                hilog.info(DOMAIN, 'ArkHelper', 'requestUserAttention: notification enabled, retry publish (id=%{public}d)', notifId);
                 doPublish();
               }).catch((e2: ESObject) => {
                 hilog.warn(DOMAIN, 'ArkHelper', 'requestUserAttention: requestEnableNotification failed: %{public}s', JSON.stringify(e2));

@@ -8,7 +8,7 @@ import {
 import { AcceleratorMatcher } from "../helper/accelerator_matcher";
 import { KeyCode, pointer } from "@kit.InputKit";
 import { hilog } from '@kit.PerformanceAnalysisKit';
-import { BusinessError } from '@kit.BasicServicesKit';
+import { BusinessError, deviceInfo } from '@kit.BasicServicesKit';
 import { window as arkWindow, CursorController } from '@kit.ArkUI';
 import { display } from '@kit.ArkUI';
 import { WindowManager } from '../window/WindowManager';
@@ -114,13 +114,18 @@ struct FloatPage {
           // API 11+;不支持则静默降级。详见 doc/OHOS窗口遗留问题.md。
           try {
             this.windowClass.on("windowStatusChange", (statusType: arkWindow.WindowStatusType) => {
+              // G9: drive the maximize/restore button icon from the actual system status,
+              // so it stays in sync when maximize/restore is triggered by the system or by
+              // the tao mirror (apply_window_status), not only on button click.
+              this.isMaximized = (statusType === arkWindow.WindowStatusType.MAXIMIZE);
               const nativeModule: ESObject = AppStorage.get<ESObject>(NATIVE_MODULE_STORAGE_KEY);
               if (nativeModule && typeof nativeModule.notifyWindowStatus === 'function') {
                 nativeModule.notifyWindowStatus(this.windowId, statusType);
               }
             });
-            // seed 初始态。
+            // seed 初始态(同时驱动按钮图标 + NAPI 镜像位)。
             const initialStatus = this.windowClass.getWindowStatus();
+            this.isMaximized = (initialStatus === arkWindow.WindowStatusType.MAXIMIZE);
             const nativeModule: ESObject = AppStorage.get<ESObject>(NATIVE_MODULE_STORAGE_KEY);
             if (nativeModule && typeof nativeModule.notifyWindowStatus === 'function') {
               nativeModule.notifyWindowStatus(this.windowId, initialStatus);
@@ -219,11 +224,12 @@ struct FloatPage {
                   try {
                     if (this.isMaximized) {
                       WindowManager.getInstance().restoreWindow(this.windowId);
-                      this.isMaximized = false;
                     } else {
                       WindowManager.getInstance().maximizeWindow(this.windowId);
-                      this.isMaximized = true;
                     }
+                    // isMaximized is driven by windowStatusChange (G9) — no optimistic
+                    // toggle here, so the icon always reflects the actual system state
+                    // once the status-change callback fires (also covers system/tao triggers).
                   } catch (err) { hilog.warn(DOMAIN, 'FloatPage', 'maximize/restore failed: %{public}s', JSON.stringify(err)); }
                 });
               }
@@ -283,8 +289,17 @@ struct FloatPage {
             .align(Alignment.TopEnd)
             // startMoving (API14+) must be called in onTouch(TouchType.Down) on the Row
             // (not Text — Text may not capture touch events reliably).
+            // Guarded like setWindowTopmost/restoreWindow: on API<14 startMoving is undefined,
+            // so skip (drag unavailable on old API) instead of throwing on every touch-down.
+            // A PanGesture fallback is NOT attached alongside startMoving — a simultaneously
+            // bound PanGesture consumes the Down event and blocks startMoving, so the two
+            // cannot coexist; mutually-exclusive Row branching was deemed not worth the
+            // duplication given Float dragging targets API14+ desktop.
             .onTouch((event: TouchEvent) => {
               if (event.type === TouchType.Down) {
+                if (deviceInfo.sdkApiVersion < 14) {
+                  return;
+                }
                 try {
                   this.windowClass?.startMoving()?.catch((err: BusinessError) => {
                     hilog.warn(DOMAIN, 'FloatPage', 'startMoving failed: %{public}s', JSON.stringify(err));
