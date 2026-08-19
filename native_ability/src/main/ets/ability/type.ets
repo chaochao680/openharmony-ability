@@ -189,6 +189,9 @@ export interface ArkHelper {
   setWindowDecorationFlags: (windowId: number, flags: number) => void;
   setPointerVisible: (visible: boolean) => void;
   setPointerStyle: (windowId: number, style: number) => void;
+  // Cursor-grab precondition query — tao window id → real OHOS window id
+  // (getWindowProperties().id); returns -1 on failure.
+  getRealWindowId: (windowId: number) => number;
   loadUrl: (id: number, url: string) => void;
   // 请求重绘 — OHOS vsync 自动驱动,此调用为 no-op log
   requestRedraw: (windowId: number) => void;

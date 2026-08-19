@@ -599,6 +599,21 @@ export class WindowManager {
     } catch (err) { hilog.warn(DOMAIN, 'WindowManager', 'setPointerStyle %{public}d failed: %{public}s', windowId, JSON.stringify(err)); }
   }
 
+  // Resolve tao's windowId (0 = main window placeholder) to the REAL OHOS window ID
+  // (getWindowProperties().id) required by native OH_WindowManager_* C APIs.
+  // NOTE: called from Rust via NAPI func.call — hilog is FORBIDDEN in this body
+  // (NAPI re-entrancy throws "Argc mismatch"); failure is expressed as -1.
+  getRealWindowId(windowId: number): number {
+    try {
+      const win = this.getWindow(windowId);
+      if (!win) { return -1; }
+      const id = win.getWindowProperties().id;
+      return (typeof id === 'number') ? id : -1;
+    } catch (_err) {
+      return -1;
+    }
+  }
+
   isMaximized(windowId: number): boolean {
     const win = this.getWindow(windowId);
     if (!win) { return false; }

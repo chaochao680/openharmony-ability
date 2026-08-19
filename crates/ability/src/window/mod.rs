@@ -3,6 +3,7 @@ use napi_ohos::threadsafe_function::{ThreadsafeCallContext, ThreadsafeFunction, 
 use napi_derive_ohos::napi;
 use napi_ohos::Env;
 use crate::{get_helper, get_main_thread_env};
+use std::ffi::{c_char, c_int, c_void};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::OnceLock;
 
@@ -722,6 +723,150 @@ pub fn set_pointer_style(window_id: i64, style: i32) -> napi_ohos::Result<()> {
         } else { crate::error!("Main thread env not available"); }
     } else { crate::error!("Helper object not initialized"); }
     Err(Error::from_reason("Helper or Env not initialized"))
+}
+
+// ─── Group F: cursor grab (OH_WindowManager_LockCursor/UnlockCursor, NDK C API 22+) ───
+//
+// No ArkTS API exists for cursor locking — the only public surface is the NDK
+// C API in libnative_window_manager.so (oh_window.h, @since 22, permission
+// ohos.permission.LOCK_WINDOW_CURSOR / normal / system_grant). The library is
+// resolved lazily via dlopen+dlsym instead of a static `#[link]`:
+// compatibleSdkVersion is API 12 and system images below API 22 do not export
+// these symbols, so a load-time link would prevent the app from starting on
+// older devices. Symbol presence doubles as the version guard
+// (dlsym null ⇒ device below API 22 ⇒ NotSupported).
+
+type LockCursorFn = unsafe extern "C" fn(window_id: i32, is_cursor_follow_movement: bool) -> i32;
+type UnlockCursorFn = unsafe extern "C" fn(window_id: i32) -> i32;
+
+struct CursorLockApi {
+    lock_cursor: LockCursorFn,
+    unlock_cursor: UnlockCursorFn,
+}
+
+/// WindowManager C API error code for "capability not supported" (oh_window_comm.h).
+const WM_ERRORCODE_DEVICE_NOT_SUPPORTED: i32 = 801;
+/// WindowManager C API error code for "window state abnormal" (oh_window_comm.h).
+const WM_ERRORCODE_STATE_ABNORMAL: i32 = 1300002;
+
+static CURSOR_LOCK_API: OnceLock<Option<CursorLockApi>> = OnceLock::new();
+
+extern "C" {
+    fn dlopen(filename: *const c_char, flags: c_int) -> *mut c_void;
+    fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
+}
+
+/// Resolves the cursor lock C API once per process; `None` when the system
+/// does not provide it (API < 22). The handle is intentionally never closed —
+/// the library stays loaded for the process lifetime.
+fn cursor_lock_api() -> Option<&'static CursorLockApi> {
+    CURSOR_LOCK_API
+        .get_or_init(|| unsafe {
+            // RTLD_NOW | RTLD_LOCAL = 2 on OHOS musl.
+            let handle = dlopen(
+                b"libnative_window_manager.so\0".as_ptr() as *const c_char,
+                2,
+            );
+            if handle.is_null() {
+                crate::warn!("[ohos-window] dlopen libnative_window_manager.so failed (library missing/broken) — cursor grab unsupported");
+                return None;
+            }
+            let lock = dlsym(handle, b"OH_WindowManager_LockCursor\0".as_ptr() as *const c_char);
+            let unlock = dlsym(handle, b"OH_WindowManager_UnlockCursor\0".as_ptr() as *const c_char);
+            if lock.is_null() || unlock.is_null() {
+                crate::warn!("[ohos-window] OH_WindowManager_LockCursor/UnlockCursor not exported — cursor grab unsupported");
+                return None;
+            }
+            Some(CursorLockApi {
+                lock_cursor: std::mem::transmute::<*mut c_void, LockCursorFn>(lock),
+                unlock_cursor: std::mem::transmute::<*mut c_void, UnlockCursorFn>(unlock),
+            })
+        })
+        .as_ref()
+}
+
+/// Typed error for `set_cursor_grab` — tao maps `NotSupported` to
+/// `ExternalError::NotSupported` (pre-change behavior on unsupported devices)
+/// and the other variants to `ExternalError::Os`.
+#[derive(Debug)]
+pub enum CursorGrabError {
+    /// System does not support cursor lock: dlsym failed (API < 22) or the
+    /// FFI call returned 801 (DEVICE_NOT_SUPPORTED).
+    NotSupported,
+    /// FFI error code: 201 (no permission), 1300002 (window state abnormal),
+    /// 1300003 (window manager service abnormal), or any other nonzero code.
+    OsCode(i32),
+    /// NAPI bridge unavailable (helper/env not ready) or window not found
+    /// (realWindowId ≤ 0).
+    Bridge(String),
+}
+
+impl std::fmt::Display for CursorGrabError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CursorGrabError::NotSupported => write!(f, "cursor lock not supported on this device"),
+            CursorGrabError::OsCode(code) => write!(f, "window manager error code {code}"),
+            CursorGrabError::Bridge(reason) => write!(f, "cursor grab bridge failure: {reason}"),
+        }
+    }
+}
+
+/// Resolves tao's window id to the real OHOS window id via the ArkTS helper
+/// (`getRealWindowId` → `getWindowProperties().id`), same synchronous
+/// single-arg call pattern as `isMaximized`. Must run on the main thread.
+///
+/// NOTE: explicit `std::result::Result` — the `Result` alias from
+/// `napi_ohos::bindgen_prelude` is `Result<T, Error<S>>` (payload-generic),
+/// not a free error type.
+fn real_window_id(window_id: i64) -> std::result::Result<i32, CursorGrabError> {
+    let ret = unsafe { get_helper() };
+    if let Some(h) = ret.borrow().as_ref() {
+        if let Some(env) = get_main_thread_env().borrow().as_ref() {
+            let obj = h.get_value(env).map_err(|e| { crate::error!("[ohos-window] getRealWindowId: helper lookup failed: {:?}", e); CursorGrabError::Bridge(format!("helper lookup: {e:?}")) })?;
+            let func = obj.get_named_property::<Function<'_, i64, i64>>("getRealWindowId")
+                .map_err(|e| CursorGrabError::Bridge(format!("getRealWindowId property missing: {e:?}")))?;
+            let id = func.call(window_id)
+                .map_err(|e| CursorGrabError::Bridge(format!("getRealWindowId call failed: {e:?}")))?;
+            if id > 0 && id <= i32::MAX as i64 {
+                return Ok(id as i32);
+            }
+            // Helper returns -1 for unknown windows; tao's placeholder ids (0)
+            // never resolve to a real instance id either.
+            return Err(CursorGrabError::Bridge(format!("window {window_id} has no real window id (helper returned {id})")));
+        }
+        return Err(CursorGrabError::Bridge("main thread env not available".to_string()));
+    }
+    Err(CursorGrabError::Bridge("helper not initialized".to_string()))
+}
+
+/// Locks/unlocks the mouse cursor to a window (tao `set_cursor_grab`).
+///
+/// Lock uses confined-follow mode (`isCursorFollowMovement=true`, cursor keeps
+/// moving within the window area — matches Windows ClipCursor semantics). The
+/// lock only takes effect while the window is focused; the system releases it
+/// automatically on focus loss. Unlock restores free cursor movement.
+///
+/// Must be called from the main thread (NAPI helper lookup); tao's window ops
+/// already run there. Returns a typed error (explicit `std::result::Result`)
+/// so tao can map `NotSupported` vs OS errors without string matching.
+pub fn set_cursor_grab(window_id: i64, grab: bool) -> std::result::Result<(), CursorGrabError> {
+    let real_id = real_window_id(window_id)?;
+    let api = cursor_lock_api().ok_or(CursorGrabError::NotSupported)?;
+    let code = if grab {
+        unsafe { (api.lock_cursor)(real_id, true) }
+    } else {
+        unsafe { (api.unlock_cursor)(real_id) }
+    };
+    match code {
+        0 => Ok(()),
+        // Unlock is idempotent: the system auto-releases the lock on focus
+        // loss, so unlocking an already-unlocked window returns STATE_ABNORMAL
+        // (1300002). Treat that as success — matches Windows, where clearing
+        // the ClipCursor flag when not grabbed succeeds silently.
+        WM_ERRORCODE_STATE_ABNORMAL if !grab => Ok(()),
+        WM_ERRORCODE_DEVICE_NOT_SUPPORTED => Err(CursorGrabError::NotSupported),
+        other => Err(CursorGrabError::OsCode(other)),
+    }
 }
 
 /// Allocates the next global window ID without creating a window.

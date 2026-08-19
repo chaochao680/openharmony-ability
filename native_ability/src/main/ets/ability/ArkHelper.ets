@@ -700,6 +700,10 @@ export function createArkHelper(): ArkHelper {
       try { WindowManager.getInstance().setPointerStyle(windowId, style); }
       catch (err) { safeLogError('setPointerStyle', err); }
     },
+    getRealWindowId: (windowId: number): number => {
+      try { return WindowManager.getInstance().getRealWindowId(windowId); }
+      catch (err) { safeLogError('getRealWindowId', err); return -1; }
+    },
 
     isMaximized: (windowId: number): boolean => {
       try { return WindowManager.getInstance().isMaximized(windowId); }
