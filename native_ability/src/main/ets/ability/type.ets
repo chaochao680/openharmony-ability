@@ -193,12 +193,14 @@ export interface ArkHelper {
   // (getWindowProperties().id); returns -1 on failure.
   getRealWindowId: (windowId: number) => number;
   loadUrl: (id: number, url: string) => void;
-  // 请求重绘 — OHOS vsync 自动驱动,此调用为 no-op log
-  requestRedraw: (windowId: number) => void;
   // 用户注意力请求 — 通过 notificationManager 发通知(非任务栏闪烁)
   requestUserAttention: () => void;
   // IME 位置 — 通过 inputMethod 通知光标位置
   setImePosition: (windowId: number, x: number, y: number) => void;
+  // IME 位置 — 读取上一次 updateCursor 的真实结果(poll 模式,setImePosition 的
+  // promise 异步结算,同步调用返回时结果尚未就绪)。返回 JSON 字符串:
+  // {"ok":bool,"code":number,"message":string,"x":number,"y":number,"ts":number}
+  getImePositionResult: () => string;
   // 拖拽缩放 — enableDrag 允许/禁止窗口边缘拖拽缩放
   setWindowDraggable: (windowId: number, enable: boolean) => void;
   createMenu?: (options: MenuCreateOptions) => Promise<string>;

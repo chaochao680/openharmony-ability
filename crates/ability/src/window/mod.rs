@@ -655,20 +655,6 @@ pub fn set_pointer_visible(visible: bool) -> napi_ohos::Result<()> {
     Err(Error::from_reason("Helper or Env not initialized"))
 }
 
-/// Request window redraw (no-op on OHOS — vsync auto-drives rendering).
-pub fn request_redraw(window_id: i64) -> napi_ohos::Result<()> {
-    let ret = unsafe { get_helper() };
-    if let Some(h) = ret.borrow().as_ref() {
-        if let Some(env) = get_main_thread_env().borrow().as_ref() {
-            let obj = h.get_value(env).map_err(|e| { crate::error!("...: {:?}", e); e })?;
-            let func = obj.get_named_property::<Function<'_, FnArgs<(i64,)>, ()>>("requestRedraw")?;
-            func.call(FnArgs { data: (window_id,) })?;
-            return Ok(());
-        }
-    }
-    Err(Error::from_reason("Helper or Env not initialized"))
-}
-
 /// Request user attention via notificationManager (no window-level API).
 pub fn request_user_attention() -> napi_ohos::Result<()> {
     let ret = unsafe { get_helper() };
@@ -683,8 +669,9 @@ pub fn request_user_attention() -> napi_ohos::Result<()> {
     Err(Error::from_reason("Helper or Env not initialized"))
 }
 
-/// Set IME cursor position via inputMethod.updateCursor(CursorInfo). API 10+.
-/// Requires a focused edit box in the window, else ArkTS catches 12800003.
+/// Set IME cursor position via inputMethod.getController().updateCursor(CursorInfo). API 10+.
+/// Requires a focused edit box in the window (HTML input in webview works too), else
+/// ArkTS catches 12800009 (input method client detached).
 pub fn set_ime_position(window_id: i64, x: i64, y: i64) -> napi_ohos::Result<()> {
     let ret = unsafe { get_helper() };
     if let Some(h) = ret.borrow().as_ref() {
@@ -693,6 +680,22 @@ pub fn set_ime_position(window_id: i64, x: i64, y: i64) -> napi_ohos::Result<()>
             let func = obj.get_named_property::<Function<'_, FnArgs<(i64, i64, i64)>, ()>>("setImePosition")?;
             func.call(FnArgs { data: (window_id, x, y,) })?;
             return Ok(());
+        }
+    }
+    Err(Error::from_reason("Helper or Env not initialized"))
+}
+
+/// Read back the real result of the last set_ime_position call. Poll pattern:
+/// ArkTS updateCursor's promise settles async after the sync NAPI call returns,
+/// so callers must wait ~500ms after set_ime_position before polling this.
+/// Returns a JSON string: {"ok":bool,"code":number,"message":string,"x":number,"y":number,"ts":number}
+pub fn get_ime_position_result() -> napi_ohos::Result<String> {
+    let ret = unsafe { get_helper() };
+    if let Some(h) = ret.borrow().as_ref() {
+        if let Some(env) = get_main_thread_env().borrow().as_ref() {
+            let obj = h.get_value(env).map_err(|e| { crate::error!("...: {:?}", e); e })?;
+            let func = obj.get_named_property::<Function<'_, (), String>>("getImePositionResult")?;
+            return func.call(());
         }
     }
     Err(Error::from_reason("Helper or Env not initialized"))

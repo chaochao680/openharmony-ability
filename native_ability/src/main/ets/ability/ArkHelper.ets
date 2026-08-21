@@ -67,6 +67,10 @@ export function createArkHelper(): ArkHelper {
   // fixed id and overwriting each other (PR#45 review F3). See requestUserAttention.
   let attentionNotifId: number = 0;
 
+  // Last updateCursor result for setImePosition — the promise settles async, so the
+  // sync NAPI call can't return it; Rust polls it back via getImePositionResult.
+  let lastImeResult: ESObject = { ok: false, code: -1, message: 'not called', x: 0, y: 0, ts: 0 };
+
   const getEmbeddedManager = (windowId: number): EmbeddedWebviewManager => {
     if (!embeddedManagers.has(windowId)) {
       const wm = WindowManager.getInstance();
@@ -740,17 +744,6 @@ export function createArkHelper(): ArkHelper {
       }
     },
 
-    requestRedraw: (windowId: number): void => {
-      // OHOS 由系统 vsync 自动驱动重绘,应用无需主动请求。此调用为 no-op log。
-      // safeLogError: 此方法经 Rust func.call 同步调用(NAPI 重入上下文),
-      // 同步段的 hilog 可能抛 "Argc mismatch"(C5),故用安全封装。
-      try {
-        hilog.info(DOMAIN, 'ArkHelper', 'requestRedraw: window %{public}d (no-op, vsync auto)', windowId);
-      } catch (err) {
-        safeLogError('requestRedraw', err);
-      }
-    },
-
     requestUserAttention: (): void => {
       // OHOS 窗口层无 requestAttention API。通过 notificationManager 发通知实现类似效果。
       // 必须用静态 import 的 notificationManager — 动态 import('@kit.NotificationKit')
@@ -792,11 +785,12 @@ export function createArkHelper(): ArkHelper {
     },
 
     setImePosition: (windowId: number, x: number, y: number): void => {
-      // IME 位置:通过 inputMethod.updateCursor(CursorInfo) 通知输入法光标坐标。
+      // IME 位置:通过 inputMethod.getController().updateCursor(CursorInfo) 通知输入法光标坐标。
       // API 10+。tao 传的是物理像素(px),CursorInfo 的 left/top 也以 px 计,直接透传。
-      // 注意:需要当前窗口内有一个已聚焦、已绑定输入法的编辑框,否则报 12800003
-      // (input method client error: no edit box bound)。这是 webview 侧输入框焦点上下文
-      // 的问题,不是 API 缺失。系统 avoidAreaChange 仍会自动处理软键盘避让。
+      // 前置条件:窗口内有已聚焦的编辑框(HTML input 亦可,ArkWeb 走系统输入法框架,
+      // 见官方《Web 组件对接软键盘》)。无聚焦编辑框时报 12800009
+      // (input method client detached) — 任何应用无聚焦编辑框时调用皆如此,非 webview 特有。
+      // 聚焦 HTML input 后实测返回 OK(2026-08-19 A/B 实验)。
       try {
         const cursorInfo: ESObject = {
           left: Math.round(x),
@@ -805,16 +799,27 @@ export function createArkHelper(): ArkHelper {
           height: 24,     // 光标高度(px,近似行高)
         };
         inputMethod.getController().updateCursor(cursorInfo).then(() => {
+          lastImeResult = { ok: true, code: 0, message: 'OK', x: Math.round(x), y: Math.round(y), ts: Date.now() };
           hilog.info(DOMAIN, 'ArkHelper', 'setImePosition: updateCursor OK window=%{public}d x=%{public}d y=%{public}d', windowId, x, y);
         }).catch((err: ESObject) => {
           const code = (err && (err as ESObject).code) ? (err as ESObject).code : -1;
-          // 12800003 = 编辑框未聚焦/未绑定输入法 — 正常,无输入框焦点时光标位置本就无意义
+          lastImeResult = { ok: false, code: code, message: JSON.stringify(err), x: Math.round(x), y: Math.round(y), ts: Date.now() };
+          // 12800009 = input method client detached — 调用时无聚焦编辑框,正常
           hilog.warn(DOMAIN, 'ArkHelper', 'setImePosition: updateCursor failed code=%{public}s: %{public}s', String(code), JSON.stringify(err));
         });
       } catch (err) {
+        // Sync throw — the .then/.catch callbacks never run, so nothing would
+        // update lastImeResult; record the failure here or the readback channel
+        // would return a stale success from a previous call (review finding).
+        lastImeResult = { ok: false, code: -1, message: 'sync throw', x: Math.round(x), y: Math.round(y), ts: Date.now() };
         // safeLogError: 同步 catch 处于 NAPI 重入上下文(C5)。
         safeLogError('setImePosition', err);
       }
+    },
+
+    getImePositionResult: (): string => {
+      // poll 回读:上一次 setImePosition 里 updateCursor promise 的真实结果
+      return JSON.stringify(lastImeResult);
     },
 
     setWindowDraggable: (windowId: number, enable: boolean): void => {
