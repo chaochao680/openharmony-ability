@@ -8,9 +8,16 @@ use ohos_xcomponent_sys::{
     OH_NativeXComponent, OH_NativeXComponent_GetMouseEvent, OH_NativeXComponent_MouseEvent,
     OH_NativeXComponent_MouseEvent_Callback, OH_NativeXComponent_RegisterMouseEventCallback,
     OH_NativeXComponent_RegisterUIInputEventCallback,
-    OH_ArkUI_AxisEvent_GetVerticalAxisValue, OH_ArkUI_AxisEvent_GetHorizontalAxisValue,
-    OH_ArkUI_AxisEvent_GetPinchAxisScaleValue, OH_ArkUI_UIInputEvent_GetSourceType,
 };
+
+// These FFI functions are private in ohos-xcomponent-sys 0.1.x but still present in the
+// shared library. Re-declare them locally until the binding crate exposes them publicly.
+extern "C" {
+    pub fn OH_ArkUI_AxisEvent_GetVerticalAxisValue(event: *const c_void) -> f64;
+    pub fn OH_ArkUI_AxisEvent_GetHorizontalAxisValue(event: *const c_void) -> f64;
+    pub fn OH_ArkUI_AxisEvent_GetPinchAxisScaleValue(event: *const c_void) -> f64;
+    pub fn OH_ArkUI_UIInputEvent_GetSourceType(event: *const c_void) -> i32;
+}
 
 /// ArkUI input event type for axis (scroll) events.
 const ARKUI_UIINPUTEVENT_TYPE_AXIS: u32 = 2;
@@ -62,6 +69,17 @@ impl From<u32> for MouseAction {
             1 => MouseAction::Press,
             2 => MouseAction::Release,
             3 => MouseAction::Move,
+            _ => MouseAction::None,
+        }
+    }
+}
+
+impl From<ohos_xcomponent_binding::MouseAction> for MouseAction {
+    fn from(value: ohos_xcomponent_binding::MouseAction) -> Self {
+        match value {
+            ohos_xcomponent_binding::MouseAction::Press => MouseAction::Press,
+            ohos_xcomponent_binding::MouseAction::Release => MouseAction::Release,
+            ohos_xcomponent_binding::MouseAction::Move => MouseAction::Move,
             _ => MouseAction::None,
         }
     }
@@ -121,6 +139,20 @@ impl MouseEventData {
                 MouseAction::HoverLeave
             },
             ..Default::default()
+        }
+    }
+}
+
+impl From<ohos_xcomponent_binding::MouseEventData> for MouseEventData {
+    fn from(data: ohos_xcomponent_binding::MouseEventData) -> Self {
+        Self {
+            x: data.x,
+            y: data.y,
+            screen_x: data.screen_x,
+            screen_y: data.screen_y,
+            timestamp: data.timestamp,
+            action: data.action.into(),
+            button: data.button,
         }
     }
 }
@@ -212,9 +244,11 @@ pub unsafe fn register_mouse_callbacks(xcomponent_raw: *mut OH_NativeXComponent)
     }
 
     // Register axis (scroll wheel) callback via ArkUI UIInputEvent API.
+    // The callback's ArkUI_UIInputEvent type is private in the binding, so we
+    // transmute the function pointer — the actual pointer value is identical.
     let ret = OH_NativeXComponent_RegisterUIInputEventCallback(
         xcomponent_raw,
-        Some(dispatch_axis_event),
+        std::mem::transmute(Some(dispatch_axis_event as unsafe extern "C" fn(_, *mut c_void, _))),
         ARKUI_UIINPUTEVENT_TYPE_AXIS,
     );
     if ret != 0 {
@@ -284,17 +318,17 @@ where
 /// Called by the OHOS runtime. `component` and `event` must be valid pointers.
 pub unsafe extern "C" fn dispatch_axis_event(
     _component: *mut OH_NativeXComponent,
-    event: *mut ohos_arkui_sys::ArkUI_UIInputEvent,
+    event: *mut c_void,
     _type: u32,
 ) {
     if event.is_null() {
         return;
     }
 
-    let delta_y = OH_ArkUI_AxisEvent_GetVerticalAxisValue(event as *const _) as f32;
-    let delta_x = OH_ArkUI_AxisEvent_GetHorizontalAxisValue(event as *const _) as f32;
-    let pinch_scale = OH_ArkUI_AxisEvent_GetPinchAxisScaleValue(event as *const _) as f32;
-    let source_type = InputSourceType::from(OH_ArkUI_UIInputEvent_GetSourceType(event as *const _));
+    let delta_y = OH_ArkUI_AxisEvent_GetVerticalAxisValue(event as *const c_void) as f32;
+    let delta_x = OH_ArkUI_AxisEvent_GetHorizontalAxisValue(event as *const c_void) as f32;
+    let pinch_scale = OH_ArkUI_AxisEvent_GetPinchAxisScaleValue(event as *const c_void) as f32;
+    let source_type = InputSourceType::from(OH_ArkUI_UIInputEvent_GetSourceType(event as *const c_void));
 
     // Skip events with no scroll delta and no pinch data.
     if delta_x == 0.0 && delta_y == 0.0 && pinch_scale == 0.0 {

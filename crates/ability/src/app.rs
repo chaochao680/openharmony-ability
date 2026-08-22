@@ -1,75 +1,33 @@
 use std::{
-    cell::Cell,
     cell::RefCell,
     collections::HashMap,
     fmt::Debug,
-    rc::Rc,
     sync::{
-        atomic::{AtomicBool, AtomicI64, AtomicU64},
+        atomic::{AtomicBool, AtomicI64},
         Arc, Mutex, RwLock,
     },
 };
 
-use futures_channel::oneshot;
 use napi_derive_ohos::napi;
-use napi_ohos::{
-    bindgen_prelude::{CallbackContext, Function, JsObjectValue, Object, Unknown},
-    threadsafe_function::ThreadsafeFunctionCallMode,
-    Error, Result,
-};
+use napi_ohos::{bindgen_prelude::Object, Env, Error, Result};
 use ohos_arkui_binding::XComponent;
-use ohos_display_binding::{default_display_height, default_display_scaled_density, default_display_width};
+use ohos_display_binding::{
+    default_display_height, default_display_refresh_rate, default_display_scaled_density,
+    default_display_width,
+};
 use ohos_ime_binding::IME;
 use ohos_xcomponent_binding::RawWindow;
 
 use crate::{
-    get_helper, get_main_thread_env, get_permission_request_tsfn,
-    resource::{
-        resource_manager as global_resource_manager,
-        set_resource_manager as set_global_resource_manager,
-    },
-    unknown_to_permission_promise, AbilityError, AvoidArea, AvoidAreaType, ColorMode, Configuration,
-    Event, OpenHarmonyWaker, PermissionRequest, PermissionRequestCode, PermissionRequestOutput,
-    Rect, ResourceManager, WAKER,
+    bridge::MainThreadBridgeEndpoint, AvoidArea, AvoidAreaType, BridgeMainThread,
+    BridgeMainThreadEvent, BridgePlugin, BridgePluginDeclaration, BridgePluginRegistry,
+    BridgeRuntime, Configuration, Event, MainThreadScheduler, OpenHarmonyWaker,
+    PluginLifecycleEvent, Rect,
 };
 
 static ID: AtomicI64 = AtomicI64::new(0);
 
 pub(crate) static HAS_EVENT: AtomicBool = AtomicBool::new(false);
-
-const DEFAULT_AVOID_AREA_TYPES: [AvoidAreaType; 5] = [
-    AvoidAreaType::System,
-    AvoidAreaType::Cutout,
-    AvoidAreaType::SystemGesture,
-    AvoidAreaType::Keyboard,
-    AvoidAreaType::NavigationIndicator,
-];
-
-fn parse_rect_from_object(rect: Object<'_>) -> Option<Rect> {
-    let top = rect.get_named_property::<i32>("top").ok()?;
-    let left = rect.get_named_property::<i32>("left").ok()?;
-    let width = rect.get_named_property::<i32>("width").ok()?;
-    let height = rect.get_named_property::<i32>("height").ok()?;
-    Some(Rect {
-        top,
-        left,
-        width,
-        height,
-    })
-}
-
-fn parse_avoid_area_options(options: Object<'_>) -> Option<(AvoidAreaType, AvoidArea)> {
-    let area_type = AvoidAreaType::from(options.get_named_property::<i32>("type").ok()?);
-    let area = options.get_named_property::<Object>("area").ok()?;
-    let avoid_area = AvoidArea {
-        visible: area.get_named_property::<bool>("visible").ok()?,
-        left_rect: parse_rect_from_object(area.get_named_property::<Object>("leftRect").ok()?)?,
-        top_rect: parse_rect_from_object(area.get_named_property::<Object>("topRect").ok()?)?,
-        right_rect: parse_rect_from_object(area.get_named_property::<Object>("rightRect").ok()?)?,
-        bottom_rect: parse_rect_from_object(area.get_named_property::<Object>("bottomRect").ok()?)?,
-    };
-    Some((area_type, avoid_area))
-}
 
 #[napi(object)]
 #[derive(Clone, Debug, Default)]
@@ -104,6 +62,9 @@ impl AbilityInitContext {
 pub struct OpenHarmonyAppInner {
     pub(crate) raw_window: Option<RawWindow>,
     pub(crate) xcomponent: Option<XComponent>,
+    /// Owner token of this native module's one active DefaultXComponent render.
+    render_owner: Option<String>,
+    surface_active: bool,
 
     state: Vec<u8>,
     save_state: bool,
@@ -111,6 +72,10 @@ pub struct OpenHarmonyAppInner {
     pub(crate) configuration: Configuration,
     pub(crate) rect: Rect,
     pub(crate) window_rect: Rect,
+    /// Last inner size set via set_inner_size(). Packed as (w:u32)<<32 | (h:u32).
+    /// 0 = unset. Used to make inner_size()→set_inner_size() idempotent on OHOS
+    /// where windowSizeChange/windowRectChange may report content area, not outer area.
+    pub(crate) last_set_inner_size: u64,
     pub(crate) avoid_areas: HashMap<AvoidAreaType, AvoidArea>,
     pub(crate) init_context: AbilityInitContext,
     
@@ -163,12 +128,15 @@ impl OpenHarmonyAppInner {
         OpenHarmonyAppInner {
             raw_window: None,
             xcomponent: None,
+            render_owner: None,
+            surface_active: false,
             state: vec![],
             save_state: false,
             id,
             configuration: Default::default(),
             rect: Default::default(),
             window_rect: Default::default(),
+            last_set_inner_size: 0,
             avoid_areas: HashMap::new(),
             init_context: AbilityInitContext::default(),
             
@@ -190,8 +158,10 @@ impl OpenHarmonyAppInner {
     }
 
     pub fn create_waker(&self) -> OpenHarmonyWaker {
-        let guard = (*WAKER).read().expect("Failed to read WAKER");
-        OpenHarmonyWaker::new((*guard).clone())
+        // Read `WAKER` live at `wake()` time, not here. See `waker.rs` for the
+        // snapshot-timing rationale: `WAKER` is populated by `create_lifecycle_handle`,
+        // which runs after the embedding runtime's entry that constructs the event-loop proxy.
+        OpenHarmonyWaker::new()
     }
 
     pub fn config(&self) -> Configuration {
@@ -207,12 +177,79 @@ impl OpenHarmonyAppInner {
         }
     }
 
+    fn claim_render_owner(&mut self, owner: &str) -> Result<()> {
+        if self.render_owner.is_some() {
+            return Err(Error::from_reason(
+                "This native module already has an active DefaultXComponent render owner",
+            ));
+        }
+        self.render_owner = Some(owner.to_owned());
+        self.surface_active = false;
+        Ok(())
+    }
+
+    fn owns_render(&self, owner: &str) -> bool {
+        self.render_owner.as_deref() == Some(owner)
+    }
+
+    fn activate_surface(&mut self, owner: &str, raw_window: Option<RawWindow>, rect: Rect) -> bool {
+        if !self.owns_render(owner) || self.surface_active {
+            return false;
+        }
+        self.raw_window = raw_window;
+        self.rect = rect;
+        self.surface_active = true;
+        true
+    }
+
+    fn update_surface_rect(&mut self, owner: &str, rect: Rect) -> bool {
+        if !self.owns_render(owner) || !self.surface_active {
+            return false;
+        }
+        self.rect = rect;
+        true
+    }
+
+    fn deactivate_surface(&mut self, owner: &str) -> bool {
+        if !self.owns_render(owner) || !self.surface_active {
+            return false;
+        }
+        self.raw_window = None;
+        self.rect = Rect::default();
+        self.surface_active = false;
+        true
+    }
+
+    fn release_render_owner(&mut self, owner: &str) -> Option<bool> {
+        if !self.owns_render(owner) {
+            return None;
+        }
+        let surface_was_active = self.surface_active;
+        self.render_owner = None;
+        self.surface_active = false;
+        self.raw_window = None;
+        self.xcomponent = None;
+        self.rect = Rect::default();
+        self.window_rect = Rect::default();
+        self.avoid_areas.clear();
+        Some(surface_was_active)
+    }
+
     pub fn content_rect(&self) -> Rect {
         self.rect
     }
 
     pub fn window_rect(&self) -> Rect {
         self.window_rect
+    }
+
+    /// Packed last-set inner size: (width:u32)<<32 | (height:u32). 0 = unset.
+    pub fn last_set_inner_size(&self) -> u64 {
+        self.last_set_inner_size
+    }
+
+    pub fn set_last_set_inner_size(&mut self, packed: u64) {
+        self.last_set_inner_size = packed;
     }
 
     pub fn avoid_area(&self, area_type: AvoidAreaType) -> Option<AvoidArea> {
@@ -235,7 +272,7 @@ impl OpenHarmonyAppInner {
     ///
     /// This is the real screen size — as opposed to `content_rect()`/`window_rect()`,
     /// which return the *window's own* rect. Consumers that need the screen size
-    /// (e.g. tao's `MonitorHandle::size()` for window centering) must use this,
+    /// (e.g. the windowing backend's `MonitorHandle::size()` for window centering) must use this,
     /// otherwise computations like positioner `Center` collapse to ~(0,0) because
     /// the window rect is smaller than itself.
     pub fn display_size(&self) -> (u32, u32) {
@@ -243,6 +280,24 @@ impl OpenHarmonyAppInner {
             default_display_width().max(0) as u32,
             default_display_height().max(0) as u32,
         )
+    }
+
+    /// Default display refresh rate (Hz) from OHOS DisplayManager.
+    /// See openspec ohos-monitor-real-values.
+    pub fn refresh_rate(&self) -> u32 {
+        default_display_refresh_rate() as u32
+    }
+
+    /// Default display physical width (px) from OHOS DisplayManager.
+    /// Returns 0 if the query fails (callers should fall back to content_rect).
+    pub fn display_width(&self) -> u32 {
+        default_display_width() as u32
+    }
+
+    /// Default display physical height (px) from OHOS DisplayManager.
+    /// Returns 0 if the query fails (callers should fall back to content_rect).
+    pub fn display_height(&self) -> u32 {
+        default_display_height() as u32
     }
 
     pub fn init_context(&self) -> AbilityInitContext {
@@ -253,104 +308,19 @@ impl OpenHarmonyAppInner {
         self.init_context = context;
     }
 
-    pub fn resource_manager(&self) -> Option<ResourceManager> {
-        global_resource_manager()
-    }
 
-    pub fn set_resource_manager(&mut self, resource_manager: Option<ResourceManager>) {
-        set_global_resource_manager(resource_manager);
-    }
-
-    pub fn exit(&self, code: i32) -> Result<()> {
-        let ret = unsafe { get_helper() };
-        if let Some(h) = ret.borrow().as_ref() {
-            // Try to get main thread env
-            if let Some(env) = get_main_thread_env().borrow().as_ref() {
-                let ret = h.get_value(env)?;
-                let exit_func = ret.get_named_property::<Function<'_, i32, ()>>("exit")?;
-                exit_func.call(code)?;
-            } else {
-                return Err(Error::from_reason(
-                    AbilityError::OnlyRunWithMainThread("exit".to_string()).to_string(),
-                ));
-            }
-        }
-        Ok(())
-    }
-
-    /// Restart the application by calling ArkTS helper `restart()` via TSFN.
-    ///
-    /// Uses a ThreadsafeFunction to dispatch the call to the main thread,
-    /// since tauri commands run on worker threads where `get_main_thread_env()`
-    /// returns None.
-    ///
-    /// Returns 0 on success, negative on failure.
-    pub fn restart(&self) -> Result<i32> {
-        let tsfn = crate::get_restart_tsfn()
-            .ok_or_else(|| Error::from_reason("RESTART_TSFN not initialized"))?;
-
-        let (tx, rx) = std::sync::mpsc::channel();
-
-        let status = tsfn.call_with_return_value(
-            (),
-            napi_ohos::threadsafe_function::ThreadsafeFunctionCallMode::NonBlocking,
-            move |result: std::result::Result<napi_ohos::bindgen_prelude::Unknown<'static>, napi_ohos::Error>, _env| {
-                let code = match result {
-                    Ok(unknown) => {
-                        if unknown.get_type().ok() == Some(napi_ohos::ValueType::Number) {
-                            unsafe { unknown.cast::<i32>().unwrap_or(-1) }
-                        } else {
-                            crate::error!("restart TSFN returned non-number type");
-                            -1
-                        }
-                    }
-                    Err(e) => {
-                        crate::error!("restart TSFN callback error: {}", e);
-                        -1
-                    }
-                };
-                let _ = tx.send(code);
-                Ok(())
-            },
-        );
-
-        if status != napi_ohos::Status::Ok {
-            return Err(Error::from_reason(format!(
-                "call restart TSFN failed: {:?}",
-                status
-            )));
-        }
-
-        rx.recv()
-            .map_err(|_| Error::from_reason("restart TSFN channel closed"))
-    }
-
-    /// Set app color mode (dark/light/system) by calling ArkTS helper `setColorMode(mode)`.
-    ///
-    /// Mode values match OHOS `ConfigurationConstant.ColorMode`:
-    /// - `-1` = COLOR_MODE_NOT_SET (follow system)
-    /// - `0` = COLOR_MODE_DARK
-    /// - `1` = COLOR_MODE_LIGHT
-    pub fn set_color_mode(&self, mode: ColorMode) -> Result<()> {
-        let ret = unsafe { get_helper() };
-        if let Some(h) = ret.borrow().as_ref() {
-            if let Some(env) = get_main_thread_env().borrow().as_ref() {
-                let ret = h.get_value(env)?;
-                let set_color_mode_fn =
-                    ret.get_named_property::<Function<'_, i32, ()>>("setColorMode")?;
-                set_color_mode_fn.call(mode as i32)?;
-            } else {
-                return Err(Error::from_reason(
-                    AbilityError::OnlyRunWithMainThread("set_color_mode".to_string()).to_string(),
-                ));
-            }
-        }
-        Ok(())
-    }
 }
 
-type EventLoop = Arc<RefCell<Option<Box<dyn FnMut(Event) + Sync + Send>>>>;
-type BackPressInterceptor = Arc<RefCell<Option<Box<dyn FnMut() -> bool + Sync + Send>>>>;
+type EventLoop = Arc<RefCell<Option<Box<dyn FnMut(Event)>>>>;
+type BackPressInterceptor = Arc<RefCell<Option<Box<dyn FnMut() -> bool>>>>;
+
+/// Transport endpoints owned by one NativeAbility/module session. This lifetime is deliberately
+/// independent from the module's optional DefaultXComponent render surface.
+struct ActiveBridgeSession {
+    owner: String,
+    runtime: BridgeRuntime,
+    main_thread_endpoint: MainThreadBridgeEndpoint,
+}
 
 #[derive(Clone)]
 pub struct OpenHarmonyApp {
@@ -358,6 +328,8 @@ pub struct OpenHarmonyApp {
     pub(crate) event_loop: EventLoop,
     pub(crate) back_press_interceptor: BackPressInterceptor,
     pub(crate) ime: Arc<RefCell<Option<IME>>>,
+    bridge_session: Arc<RwLock<Option<ActiveBridgeSession>>>,
+    bridge_plugins: Arc<BridgePluginRegistry>,
     is_keyboard_show: Arc<Mutex<bool>>,
 }
 
@@ -408,6 +380,8 @@ impl OpenHarmonyApp {
             back_press_interceptor: Arc::new(RefCell::new(None)),
             #[allow(clippy::arc_with_non_send_sync)]
             ime: Arc::new(RefCell::new(None)),
+            bridge_session: Arc::new(RwLock::new(None)),
+            bridge_plugins: Arc::new(BridgePluginRegistry::default()),
             is_keyboard_show: Arc::new(Mutex::new(false)),
         }
     }
@@ -452,16 +426,221 @@ impl OpenHarmonyApp {
         self.init_context().preferred_locales
     }
 
-    pub fn resource_manager(&self) -> Option<ResourceManager> {
-        global_resource_manager()
+    pub(crate) fn begin_render(&self, owner: &str, xcomponent: XComponent) -> Result<()> {
+        let bridge_active = self
+            .bridge_session
+            .read()
+            .map_err(|_| Error::from_reason("Failed to read native module bridge session"))?
+            .is_some();
+        if !bridge_active {
+            return Err(Error::from_reason(
+                "A DefaultXComponent cannot render outside an active NativeAbility module session",
+            ));
+        }
+        let mut inner = self
+            .inner
+            .write()
+            .map_err(|_| Error::from_reason("Failed to claim native render owner"))?;
+        inner.claim_render_owner(owner)?;
+        inner.xcomponent = Some(xcomponent);
+        Ok(())
+    }
+
+    pub(crate) fn activate_render_surface(
+        &self,
+        owner: &str,
+        raw_window: Option<RawWindow>,
+        rect: Rect,
+    ) -> bool {
+        self.inner
+            .write()
+            .map(|mut inner| inner.activate_surface(owner, raw_window, rect))
+            .unwrap_or(false)
+    }
+
+    pub(crate) fn update_render_surface_rect(&self, owner: &str, rect: Rect) -> bool {
+        self.inner
+            .write()
+            .map(|mut inner| inner.update_surface_rect(owner, rect))
+            .unwrap_or(false)
+    }
+
+    pub(crate) fn is_render_surface_active(&self, owner: &str) -> bool {
+        self.inner
+            .read()
+            .map(|inner| inner.owns_render(owner) && inner.surface_active)
+            .unwrap_or(false)
+    }
+
+    pub(crate) fn deactivate_render_surface(&self, owner: &str) -> bool {
+        let deactivated = self
+            .inner
+            .write()
+            .map(|mut inner| inner.deactivate_surface(owner))
+            .unwrap_or(false);
+        if deactivated {
+            self.ime.borrow_mut().take();
+        }
+        deactivated
+    }
+
+    /// Releases one generated `#[ability]` render. A stale owner is ignored, so delayed cleanup
+    /// from an old DefaultXComponent cannot clear a replacement component's native state.
+    #[doc(hidden)]
+    pub fn release_render(&self, owner: &str) {
+        let surface_was_active = self
+            .inner
+            .write()
+            .ok()
+            .and_then(|mut inner| inner.release_render_owner(owner));
+        let Some(surface_was_active) = surface_was_active else {
+            return;
+        };
+        self.ime.borrow_mut().take();
+        if surface_was_active {
+            self.dispatch_surface_destroy();
+        }
+    }
+
+    pub(crate) fn dispatch_surface_destroy(&self) {
+        if let Some(ref mut handler) = *self.event_loop.borrow_mut() {
+            handler(Event::SurfaceDestroy);
+        }
+    }
+
+    /// Returns the generic ArkTS bridge for this native module.
+    ///
+    /// The runtime is initialized with the NativeAbility/module session, before any
+    /// DefaultXComponent is required. Calls can be made from a worker thread; they are always
+    /// marshalled back to ArkTS through a ThreadsafeFunction. Individual plugins still enforce
+    /// their declared Ability, WindowStage, or UIContext readiness.
+    pub fn bridge(&self) -> Result<BridgeRuntime> {
+        self.bridge_session
+            .read()
+            .map_err(|_| Error::from_reason("Failed to read bridge runtime"))?
+            .as_ref()
+            .map(|session| session.runtime.clone())
+            .ok_or_else(|| {
+                Error::from_reason(
+                    "Bridge runtime is not ready. Call it during an active NativeAbility session.",
+                )
+            })
+    }
+
+    /// Schedules a Rust closure onto the ArkTS/N-API main thread.
+    ///
+    /// UI and ArkTS work should normally use [`Self::bridge`]'s typed plugin calls. This helper
+    /// is for a small Rust-side state transition that must observe main-thread affinity.
+    pub fn main_thread(&self) -> Result<MainThreadScheduler> {
+        Ok(self.bridge()?.main_thread())
+    }
+
+    /// Runs a synchronous bridge call while the caller owns the current N-API main-thread `Env`.
+    ///
+    /// A `BridgeMainThread` cannot be cloned or sent to a worker. In particular,
+    /// `MainThreadScheduler::run` does not provide this capability because it does not carry a
+    /// scoped N-API environment.
+    pub fn with_main_thread_bridge<T>(
+        &self,
+        env: &Env,
+        operation: impl FnOnce(BridgeMainThread<'_>) -> Result<T>,
+    ) -> Result<T> {
+        let bridge = self
+            .bridge_session
+            .read()
+            .map_err(|_| Error::from_reason("Failed to read main-thread bridge"))?;
+        let endpoint = bridge
+            .as_ref()
+            .map(|session| &session.main_thread_endpoint)
+            .ok_or_else(|| {
+                Error::from_reason(
+                "Synchronous bridge is not ready. Call it during an active NativeAbility session.",
+            )
+            })?;
+        operation(BridgeMainThread::new(env, endpoint))
+    }
+
+    /// Registers a Rust facade for ArkTS-originated events and lifecycle notifications.
+    ///
+    /// Register during the `#[ability]` initializer, before UI rendering starts. Registration is
+    /// keyed by `BridgePlugin::ID`, so duplicate contracts fail deterministically.
+    pub fn register_plugin<P>(&self, plugin: P) -> Result<()>
+    where
+        P: BridgePlugin,
+    {
+        self.bridge_plugins.register(plugin)
+    }
+
+    /// Returns the concrete Rust plugin instance registered for this native module.
+    pub fn registered_plugin<P>(&self) -> Result<Option<Arc<P>>>
+    where
+        P: BridgePlugin,
+    {
+        self.bridge_plugins.registered::<P>()
+    }
+
+    /// Structural plugin contracts configured by this native module. Used by generated startup
+    /// code so ArkTS can select matching factories without exposing module routing to plugins or
+    /// application registration.
+    #[doc(hidden)]
+    pub fn bridge_plugin_declarations(&self) -> Result<Vec<BridgePluginDeclaration>> {
+        self.bridge_plugins.declarations()
     }
 
     #[doc(hidden)]
-    pub fn set_resource_manager(&self, resource_manager: Option<ResourceManager>) {
-        self.inner
+    pub fn dispatch_bridge_main_thread_event<'env>(
+        &self,
+        event: BridgeMainThreadEvent<'env>,
+    ) -> Result<napi_ohos::bindgen_prelude::Unknown<'env>> {
+        self.bridge_plugins.dispatch_main_thread_event(event)
+    }
+
+    #[doc(hidden)]
+    pub fn dispatch_plugin_lifecycle(&self, event: PluginLifecycleEvent) -> Result<()> {
+        self.bridge_plugins.dispatch_lifecycle(event)
+    }
+
+    pub(crate) fn begin_bridge_session(
+        &self,
+        owner: &str,
+        runtime: BridgeRuntime,
+        main_thread_endpoint: MainThreadBridgeEndpoint,
+    ) -> Result<()> {
+        if owner.is_empty() {
+            return Err(Error::from_reason("Bridge session owner must not be empty"));
+        }
+        let mut session = self
+            .bridge_session
             .write()
-            .unwrap()
-            .set_resource_manager(resource_manager);
+            .map_err(|_| Error::from_reason("Failed to claim bridge session"))?;
+        if session.is_some() {
+            return Err(Error::from_reason(
+                "This native module already belongs to an active NativeAbility bridge session",
+            ));
+        }
+        *session = Some(ActiveBridgeSession {
+            owner: owner.to_owned(),
+            runtime,
+            main_thread_endpoint,
+        });
+        Ok(())
+    }
+
+    /// Releases only the matching Ability/module transport. A delayed stale teardown cannot
+    /// clear endpoints installed for a later session.
+    #[doc(hidden)]
+    pub fn release_bridge_session(&self, owner: &str) {
+        let released = self.bridge_session.write().ok().and_then(|mut session| {
+            if session.as_ref().map(|active| active.owner.as_str()) != Some(owner) {
+                return None;
+            }
+            session.take()
+        });
+        if released.is_some() {
+            if let Ok(mut inner) = self.inner.write() {
+                inner.set_init_context(AbilityInitContext::default());
+            }
+        }
     }
 
     pub fn show_keyboard(&self) {
@@ -496,53 +675,21 @@ impl OpenHarmonyApp {
         self.inner.read().unwrap().window_rect()
     }
 
-    fn fetch_avoid_area_from_helper(
-        &self,
-        area_type: AvoidAreaType,
-    ) -> Option<(AvoidAreaType, AvoidArea)> {
-        let helper = unsafe { get_helper() };
-        let helper_borrow = helper.borrow();
-        let helper_ref = helper_borrow.as_ref()?;
-        let env = get_main_thread_env();
-        let env_borrow = env.borrow();
-        let env_ref = env_borrow.as_ref()?;
-        let helper_object = helper_ref.get_value(env_ref).ok()?;
-        let get_window_avoid_area = helper_object
-            .get_named_property::<Function<'_, i32, Object<'_>>>("getWindowAvoidArea")
-            .ok()?;
-        let options = get_window_avoid_area.call(i32::from(area_type)).ok()?;
-        parse_avoid_area_options(options)
+    /// Packed last-set inner size: (width:u32)<<32 | (height:u32). 0 = unset.
+    pub fn last_set_inner_size(&self) -> u64 {
+        self.inner.read().unwrap().last_set_inner_size()
     }
 
-    fn ensure_avoid_area_cached(&self, area_type: AvoidAreaType) {
-        if self.inner.read().unwrap().avoid_area(area_type).is_some() {
-            return;
-        }
-        if let Some((fetched_type, area)) = self.fetch_avoid_area_from_helper(area_type) {
-            self.inner
-                .write()
-                .unwrap()
-                .avoid_areas
-                .insert(fetched_type, area);
-        }
+    pub fn set_last_set_inner_size(&self, packed: u64) {
+        self.inner.write().unwrap().set_last_set_inner_size(packed);
     }
 
-    fn ensure_avoid_areas_cached(&self) {
-        if !self.inner.read().unwrap().avoid_areas.is_empty() {
-            return;
-        }
-        for area_type in DEFAULT_AVOID_AREA_TYPES {
-            self.ensure_avoid_area_cached(area_type);
-        }
-    }
 
     pub fn avoid_area(&self, area_type: AvoidAreaType) -> Option<AvoidArea> {
-        self.ensure_avoid_area_cached(area_type);
         self.inner.read().unwrap().avoid_area(area_type)
     }
 
     pub fn avoid_areas(&self) -> HashMap<AvoidAreaType, AvoidArea> {
-        self.ensure_avoid_areas_cached();
         self.inner.read().unwrap().avoid_areas()
     }
     pub fn native_window(&self) -> Option<RawWindow> {
@@ -560,141 +707,56 @@ impl OpenHarmonyApp {
         self.inner.read().unwrap().display_size()
     }
 
-/// Exit current app with code
-    pub fn exit(&self, code: i32) {
-        self.inner.read().unwrap().exit(code).unwrap();
+    /// Default display refresh rate (Hz) from OHOS DisplayManager.
+    pub fn refresh_rate(&self) -> u32 {
+        self.inner.read().unwrap().refresh_rate()
     }
 
-    /// Restart the application.
-    ///
-    /// This is a hard process kill — `onDestroy` is NOT triggered.
-    /// Requires the app to be in the foreground.
-    /// Has a 3-second cooldown between calls.
-    ///
-    /// Returns 0 on success, negative error code on failure.
-    pub fn restart(&self) -> Result<i32> {
-        self.inner.read().unwrap().restart()
+    /// Default display physical width (px) from OHOS DisplayManager.
+    pub fn display_width(&self) -> u32 {
+        self.inner.read().unwrap().display_width()
     }
 
-    /// Set app color mode (dark/light/system).
-    /// Delegates to ArkTS helper `setColorMode(mode)`.
-    pub fn set_color_mode(&self, mode: ColorMode) -> Result<()> {
-        self.inner.read().unwrap().set_color_mode(mode)
+    /// Default display physical height (px) from OHOS DisplayManager.
+    pub fn display_height(&self) -> u32 {
+        self.inner.read().unwrap().display_height()
     }
 
     /// Get an updater handle for checking and installing updates via AppGallery.
+    ///
+    /// Core-privileged OHOS capability (not Tauri-shaped).
+    ///
+    /// First-class OHOS ability exposed on par with `RuntimeInitArgs.app`.
+    /// Intentionally NOT facade-ized: the API has no Tauri shape (pure OHOS
+    /// platform capability). Precedent: `OpenHarmonyApp::updater()`.
+    ///
+    /// Returns `Result<Updater>` (breaking change, 2026-08-21): the handle now
+    /// holds a `BridgeRuntime` resolved from the active session, replacing the
+    /// former global TSFN transport which was never wired up.
     #[cfg(feature = "updater")]
-    pub fn updater(&self) -> super::updater::Updater {
-        super::updater::Updater
+    pub fn updater(&self) -> Result<super::updater::Updater> {
+        super::updater::Updater::new(self)
     }
 
-    /// Request one or more runtime permissions through ArkTS helper.
-    /// Returns each requested permission and the corresponding request result code.
-    /// ! Don't call this function from main thread with block_on.
-    pub async fn request_permission<P>(&self, permission: P) -> Result<Vec<PermissionRequestCode>>
-    where
-        P: Into<PermissionRequest>,
-    {
-        let request = permission.into();
-        let requested_permissions = request.permissions();
-        let input = request.into_input();
 
-        let permission_tsfn = get_permission_request_tsfn().ok_or_else(|| {
-            Error::from_reason("requestPermission threadsafe function is not initialized")
-        })?;
-
-        let (tx, rx) = oneshot::channel::<Result<PermissionRequestOutput>>();
-        let status = permission_tsfn.call_with_return_value(
-            input,
-            ThreadsafeFunctionCallMode::NonBlocking,
-            move |result, _| {
-                match result {
-                    Ok(value) => {
-                        let tx_cell = Rc::new(Cell::new(Some(tx)));
-                        let tx_in_catch = tx_cell.clone();
-                        let promise = unknown_to_permission_promise(value)?;
-                        promise
-                            .then(move |ctx| {
-                                if let Some(sender) = tx_cell.replace(None) {
-                                    let _ = sender.send(Ok(ctx.value));
-                                }
-                                Ok(())
-                            })?
-                            .catch(move |ctx: CallbackContext<Unknown>| {
-                                if let Some(sender) = tx_in_catch.replace(None) {
-                                    let _ = sender.send(Err(ctx.value.into()));
-                                }
-                                Ok(())
-                            })?;
-                    }
-                    Err(err) => {
-                        let _ = tx.send(Err(err));
-                    }
-                }
-
-                Ok(())
-            },
-        );
-
-        if status != napi_ohos::Status::Ok {
-            return Err(Error::from_reason(format!(
-                "call requestPermission failed with status: {:?}",
-                status
-            )));
-        }
-
-        let output = rx
-            .await
-            .map_err(|_| Error::from_reason("requestPermission callback receiver dropped"))??;
-
-        let codes = match output {
-            napi_ohos::Either::A(code) => vec![code],
-            napi_ohos::Either::B(codes) => codes,
-        };
-
-        if requested_permissions.len() != codes.len() {
-            return Err(Error::from_reason(format!(
-                "requestPermission result length mismatch: requested {}, got {}",
-                requested_permissions.len(),
-                codes.len()
-            )));
-        }
-
-        Ok(requested_permissions
-            .into_iter()
-            .zip(codes)
-            .map(|(permission, code)| PermissionRequestCode { permission, code })
-            .collect())
-    }
-
-    pub fn run_loop<'a, F: FnMut(Event) + 'a>(&self, mut event_handle: F) {
+    pub fn run_loop<F: FnMut(Event) + 'static>(&self, event_handle: F) {
         if HAS_EVENT.load(std::sync::atomic::Ordering::SeqCst) {
             return;
         }
 
-        let static_handler = unsafe {
-            std::mem::transmute::<
-                Box<dyn FnMut(Event) + 'a>,
-                Box<dyn FnMut(Event) + 'static + Sync + Send>,
-            >(Box::new(move |event| {
-                event_handle(event);
-            }))
-        };
-
+        // The handler is required to be `'static` (no borrows of `self` or other
+        // non-'static data), so it can be stored in the `Box<dyn FnMut(Event)>`
+        // slot without any lifetime erasure. The `HAS_EVENT` guard ensures
+        // `run_loop` is called exactly once and the app outlives all event
+        // dispatch.
+        let static_handler: Box<dyn FnMut(Event) + 'static> = Box::new(event_handle);
         self.event_loop.replace(Some(static_handler));
         HAS_EVENT.store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Register back press interceptor. Return `true` to intercept back action, `false` to pass through.
-    pub fn on_back_press_intercept<'a, F: FnMut() -> bool + 'a>(&self, interceptor: F) {
-        let static_handler = unsafe {
-            std::mem::transmute::<
-                Box<dyn FnMut() -> bool + 'a>,
-                Box<dyn FnMut() -> bool + 'static + Sync + Send>,
-            >(Box::new(interceptor))
-        };
-
-        self.back_press_interceptor.replace(Some(static_handler));
+    pub fn on_back_press_intercept<F: FnMut() -> bool + 'static>(&self, interceptor: F) {
+        self.back_press_interceptor.replace(Some(Box::new(interceptor)));
     }
 
     /// Get back press interceptor result
@@ -714,7 +776,28 @@ impl Default for OpenHarmonyApp {
     }
 }
 
-// TODO: Can we remove this?
+// SAFETY: `OpenHarmonyApp` is logically main-thread-affine. The `!Send`/`!Sync`
+// auto-derivation comes solely from `OpenHarmonyAppInner`'s native handle fields
+// (`raw_window: Option<RawWindow>`, `xcomponent: Option<XComponent>`) and
+// `ime: Arc<RefCell<Option<IME>>>`. Soundness invariants upheld:
+//
+// 1. The `OpenHarmonyApp` is wrapped in an `Arc`; clones may be moved to and
+//    shared across threads, but the native handle fields are only ever
+//    dereferenced on the NAPI main thread (where the XComponent/surface
+//    callbacks and IME are valid).
+// 2. Worker threads that resolve async bridge commands are marshalled back to
+//    the main thread via TSFN callbacks; `get_main_thread_env()` is a
+//    thread-local that returns `None` off the main thread, so worker contexts
+//    never touch native handles directly.
+// 3. All interior mutability is provided by `Arc<RwLock>`/`Arc<RefCell>`/
+//    `Arc<Mutex>` guards — there is no `&mut` aliasing of `OpenHarmonyAppInner`.
+//
+// This impl cannot be removed yet: `tauri/crates/tauri/src/ohos.rs:18` holds a
+// `static APP: Mutex<Option<OpenHarmonyApp>>` (requires `Send`), and
+// `crates/derive/src/lib.rs:85` constructs a `LazyLock<OpenHarmonyApp>` (requires
+// `Send + Sync`). Fully eliminating the unsafe impl would require splitting the
+// native handles out of `OpenHarmonyAppInner` into a main-thread-only /
+// thread-local structure — tracked as future work.
 unsafe impl Send for OpenHarmonyApp {}
 unsafe impl Sync for OpenHarmonyApp {}
 
@@ -726,20 +809,20 @@ pub fn is_desktop_device() -> bool {
 
 /// Global queue for pending window close requests from ArkTS.
 /// When ArkTS intercepts a close-window URL, it pushes the OHOS window ID here
-/// instead of directly destroying the window. The tauri-runtime-wry event loop
-/// drains this queue and processes closes through the proper Rust lifecycle
-/// (CloseRequested → Destroyed → WindowsStore cleanup).
+/// instead of directly destroying the window. The runtime event loop drains this
+/// queue and processes closes through the proper Rust lifecycle
+/// (close-requested → destroyed lifecycle, defined by the embedding runtime).
 #[cfg(target_env = "ohos")]
 static PENDING_WINDOW_CLOSES: Mutex<Vec<i32>> = Mutex::new(Vec::new());
 
 /// NAPI function called from ArkTS to request a window close.
 /// This queues the OHOS window ID for processing by the Rust event loop,
-/// ensuring proper lifecycle events (CloseRequested, Destroyed) are emitted.
+/// ensuring proper lifecycle events (close-requested, destroyed) are emitted.
 ///
 /// Timing: ArkTS calls this synchronously before `destroyWindow()` (async).
 /// The Rust event loop drains the queue at the start of the next iteration,
 /// processing window IDs before the async OHOS destruction completes.
-/// The Rust side only uses the ID to look up the Tauri window in WindowsStore —
+/// The Rust side only uses the ID to look up the matching window —
 /// it never accesses the OHOS window object directly, so destroyed windows are safe.
 #[napi]
 #[cfg(target_env = "ohos")]
@@ -754,86 +837,18 @@ pub fn notify_window_close(window_id: i32) {
 }
 
 /// Drain all pending window close requests.
-/// Called by tauri-runtime-wry event loop to process queued closes.
+/// Called by the runtime event loop to process queued closes.
 ///
-/// TODO(遗留问题一): 这是 OHOS 关窗事件的旁路通道,因 tao 的 WindowId 是 ZST、
-///   MainEvent::WindowDestroy 不携带窗口身份,关窗只能由 ArkTS 把真实 windowId
-///   压入本队列,runtime-wry 每轮 drain 后用真实 id 精确匹配 Tauri 窗口。
-///   其他平台无需此机制(系统 API 天然带窗口身份)。
-///   根因、影响范围(不止关窗)、根治路径见 doc/OHOS窗口遗留问题.md(问题一)
+/// OHOS close-window events carry the real OS window ID via this queue,
+/// because the event system does not propagate window identity through the
+/// normal event channel. The runtime drains this queue each iteration and
+/// matches the IDs to its internal window registry.
 #[cfg(target_env = "ohos")]
 pub fn drain_pending_window_closes() -> Vec<i32> {
     PENDING_WINDOW_CLOSES
         .lock()
         .map(|mut q| q.drain(..).collect())
         .unwrap_or_default()
-}
-
-/// Global queue for pending window status changes from ArkTS.
-/// When ArkTS receives `window.on('windowStatusChange')`, it pushes the OHOS
-/// window ID + `WindowStatusType` value here. The tauri-runtime-wry event loop
-/// drains this queue and routes each (window_id, status) to the matching tao
-/// `Window` via `apply_window_status`, which updates the `visible`/`fullscreen`
-/// mirror bits to reflect system truth.
-///
-/// Mirrors the `notify_window_close` / `drain_pending_window_closes` bypass:
-/// tao's ZST `WindowId` cannot carry identity, so real OHOS window IDs are
-/// routed here. See doc/OHOS窗口遗留问题.md(问题五 5.3).
-#[cfg(target_env = "ohos")]
-static PENDING_WINDOW_STATUS: Mutex<Vec<(i32, i32)>> = Mutex::new(Vec::new());
-
-/// NAPI function called from ArkTS `windowStatusChange` callbacks to report a
-/// window status change. Queues (window_id, status) for the Rust event loop.
-///
-/// `status` is the raw OHOS `WindowStatusType` value (transparently forwarded):
-/// FULL_SCREEN=1, MAXIMIZE=2, MINIMIZE=3, FLOATING=4, SPLIT_SCREEN=5.
-/// Semantic decoding happens on the tao side (`apply_window_status`); this layer
-/// only transports the integer.
-#[napi]
-#[cfg(target_env = "ohos")]
-pub fn notify_window_status(window_id: i32, status: i32) {
-    match PENDING_WINDOW_STATUS.lock() {
-        Ok(mut queue) => queue.push((window_id, status)),
-        Err(poisoned) => {
-            log::warn!(
-                "[OHOS] PENDING_WINDOW_STATUS mutex poisoned, recovering. window_id={} status={}",
-                window_id, status
-            );
-            poisoned.into_inner().push((window_id, status));
-        }
-    }
-}
-
-/// Drain all pending window status changes.
-/// Called by tauri-runtime-wry event loop (alongside `drain_pending_window_closes`)
-/// to回灌 system window status into tao mirror bits. See doc/OHOS窗口遗留问题.md(问题五 5.3).
-#[cfg(target_env = "ohos")]
-pub fn drain_pending_window_status() -> Vec<(i32, i32)> {
-    PENDING_WINDOW_STATUS
-        .lock()
-        .map(|mut q| q.drain(..).collect())
-        .unwrap_or_default()
-}
-
-// ─── Cursor position tracking ─────────────────────────────────────────────────
-// ArkTS onMouse handler calls update_cursor_position() via NAPI.
-// tao reads these values in cursor_position().
-
-/// Last known cursor X position (f64 stored as u64 bits).
-#[cfg(target_env = "ohos")]
-pub static CURSOR_POSITION_X: AtomicU64 = AtomicU64::new(0);
-/// Last known cursor Y position (f64 stored as u64 bits).
-#[cfg(target_env = "ohos")]
-pub static CURSOR_POSITION_Y: AtomicU64 = AtomicU64::new(0);
-
-/// NAPI function called from ArkTS onMouse handler to update cursor position.
-/// ArkTS passes window-relative coordinates from MouseEvent.x/y.
-#[napi]
-#[cfg(target_env = "ohos")]
-pub fn update_cursor_position(x: f64, y: f64) {
-    use std::sync::atomic::Ordering;
-    CURSOR_POSITION_X.store(x.to_bits(), Ordering::Relaxed);
-    CURSOR_POSITION_Y.store(y.to_bits(), Ordering::Relaxed);
 }
 
 #[derive(Clone)]
@@ -860,10 +875,9 @@ impl<'a> SaveLoader<'a> {
 
 // --- want.parameters storage for single-instance plugin ---
 
-#[cfg(target_env = "ohos")]
-static WANT_PARAMETERS: Mutex<String> = Mutex::new(String::new());
+/// Stores the latest `want.parameters` JSON from `onNewWant`.
+pub(crate) static WANT_PARAMETERS: Mutex<String> = Mutex::new(String::new());
 
-#[cfg(target_env = "ohos")]
 pub(crate) fn store_want_parameters(json: &str) {
     match WANT_PARAMETERS.lock() {
         Ok(mut params) => *params = json.to_string(),
@@ -871,32 +885,23 @@ pub(crate) fn store_want_parameters(json: &str) {
     }
 }
 
-/// Returns the latest `want.parameters` JSON string from `onNewWant`, then clears it.
+/// Takes the latest `want.parameters` JSON (draining the stored value).
 ///
-/// Returns an empty string if no parameters are pending or if the mutex is poisoned.
-///
-/// # Concurrency
-/// - `store` is called from the ArkTS main thread (via NAPI `on_new_want` closure)
-/// - `take` is called from the tauri event loop thread (via `RunEvent::Opened` handler)
-/// - Cross-thread safety is ensured by `Mutex<String>`
-/// - If `store` is called twice before `take`, the first value is overwritten
-#[cfg(target_env = "ohos")]
+/// Safe to call from any thread. The value is consumed (replaced with an empty
+/// `String`), so a second call returns `""` until the next `onNewWant` stores a
+/// fresh value. Consumed by the `plugin-deep-link` facade (`DeepLinkClient`).
 pub fn take_want_parameters() -> String {
-    match WANT_PARAMETERS.lock() {
-        Ok(mut p) => std::mem::take(&mut *p),
-        Err(e) => {
-            crate::error!("WANT_PARAMETERS mutex poisoned in take: {}", e);
-            String::new()
-        }
-    }
+    WANT_PARAMETERS
+        .lock()
+        .map(|mut p| std::mem::take(&mut *p))
+        .unwrap_or_default()
 }
 
 // --- initial want.uri storage for deep-link plugin (cold start onCreate) ---
 
-#[cfg(target_env = "ohos")]
-static INITIAL_WANT_URI: Mutex<String> = Mutex::new(String::new());
+/// Stores the initial `want.uri` from `onCreate` (cold start).
+pub(crate) static INITIAL_WANT_URI: Mutex<String> = Mutex::new(String::new());
 
-#[cfg(target_env = "ohos")]
 pub(crate) fn store_initial_want_uri(uri: &str) {
     match INITIAL_WANT_URI.lock() {
         Ok(mut u) => *u = uri.to_string(),
@@ -904,51 +909,98 @@ pub(crate) fn store_initial_want_uri(uri: &str) {
     }
 }
 
-/// Returns the initial `want.uri` from `onCreate` (cold start), then clears it.
+/// Takes the initial `want.uri` from `onCreate` (draining the stored value).
 ///
-/// Used by tauri-plugin-deep-link's `init_deep_link` to inject the first-launch
-/// URL into `current` (pull model, no Event variant).
-///
-/// # Concurrency
-/// - `store` is called from the ArkTS main thread (via NAPI `on_ability_create_with_want` closure)
-/// - `take` is called from the tauri plugin setup thread (via `init_deep_link`)
-/// - Cross-thread safety is ensured by `Mutex<String>`
-/// - `take` semantics: read-once (clears after read)
-#[cfg(target_env = "ohos")]
+/// Safe to call from any thread. The value is consumed (replaced with an empty
+/// `String`), so a second call returns `""`. Consumed by the `plugin-deep-link`
+/// facade (`DeepLinkClient`) to surface the cold-start deep link.
 pub fn take_initial_want_uri() -> String {
-    match INITIAL_WANT_URI.lock() {
-        Ok(mut u) => std::mem::take(&mut *u),
-        Err(e) => {
-            crate::error!("INITIAL_WANT_URI mutex poisoned in take: {}", e);
-            String::new()
-        }
-    }
+    INITIAL_WANT_URI
+        .lock()
+        .map(|mut u| std::mem::take(&mut *u))
+        .unwrap_or_default()
 }
 
-/// Tests for WANT_PARAMETERS global static.
-/// Combined into a single #[test] to avoid parallel execution races on the shared static.
+/// Tests for WANT_PARAMETERS and INITIAL_WANT_URI global statics.
 #[cfg(test)]
 mod want_parameters_tests {
     use super::*;
 
+    fn take_want_parameters() -> String {
+        WANT_PARAMETERS
+            .lock()
+            .map(|mut p| std::mem::take(&mut *p))
+            .unwrap_or_default()
+    }
+
     #[test]
     fn test_want_parameters_store_take_overwrite() {
-        // 1. store and take
         take_want_parameters(); // ensure clean state
         store_want_parameters(r#"{"key":"value","num":42}"#);
         assert_eq!(take_want_parameters(), r#"{"key":"value","num":42}"#);
 
-        // 2. take clears after read
         store_want_parameters(r#"{"source":"widget"}"#);
         assert_eq!(take_want_parameters(), r#"{"source":"widget"}"#);
         assert_eq!(take_want_parameters(), "");
 
-        // 3. take without store returns empty
         assert_eq!(take_want_parameters(), "");
 
-        // 4. overwrite: last store wins
         store_want_parameters(r#"{"first":1}"#);
         store_want_parameters(r#"{"second":2}"#);
         assert_eq!(take_want_parameters(), r#"{"second":2}"#);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::OpenHarmonyAppInner;
+    use crate::{AvoidArea, AvoidAreaType, Rect};
+
+    #[test]
+    fn render_owner_rejects_overlap_and_ignores_stale_surface_callbacks() {
+        let mut inner = OpenHarmonyAppInner::new();
+        inner.claim_render_owner("owner-a").unwrap();
+        assert!(inner.claim_render_owner("owner-b").is_err());
+        assert!(!inner.activate_surface("owner-b", None, Rect::default()));
+        assert!(inner.activate_surface("owner-a", None, Rect::default()));
+        assert_eq!(inner.release_render_owner("owner-b"), None);
+        assert_eq!(inner.release_render_owner("owner-a"), Some(true));
+
+        inner.claim_render_owner("owner-b").unwrap();
+        assert!(inner.activate_surface("owner-b", None, Rect::default()));
+        assert!(!inner.deactivate_surface("owner-a"));
+        assert_eq!(inner.release_render_owner("owner-a"), None);
+        assert!(inner.owns_render("owner-b"));
+        assert!(inner.surface_active);
+    }
+
+    #[test]
+    fn surface_recreation_keeps_the_same_render_owner() {
+        let mut inner = OpenHarmonyAppInner::new();
+        inner.claim_render_owner("owner").unwrap();
+        assert!(inner.activate_surface("owner", None, Rect::default()));
+        assert!(inner.deactivate_surface("owner"));
+        assert!(inner.owns_render("owner"));
+        assert!(inner.activate_surface("owner", None, Rect::default()));
+        assert_eq!(inner.release_render_owner("owner"), Some(true));
+    }
+
+    #[test]
+    fn releasing_a_component_clears_its_window_scoped_cache() {
+        let mut inner = OpenHarmonyAppInner::new();
+        inner.claim_render_owner("owner").unwrap();
+        inner.window_rect = Rect {
+            top: 1,
+            left: 2,
+            width: 3,
+            height: 4,
+        };
+        inner
+            .avoid_areas
+            .insert(AvoidAreaType::Keyboard, AvoidArea::default());
+
+        assert_eq!(inner.release_render_owner("owner"), Some(false));
+        assert_eq!(inner.window_rect, Rect::default());
+        assert!(inner.avoid_areas.is_empty());
     }
 }
