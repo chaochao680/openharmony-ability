@@ -5,7 +5,7 @@ import {
   getMenuBarRecoverFn,
   isMenubarVisible,
 } from "./MenuBarComponent";
-import { AcceleratorMatcher } from "../helper/accelerator_matcher";
+import { AcceleratorMatcher, isClipboardEnabled, isZoomHotkeysEnabled } from "../helper/accelerator_matcher";
 import { KeyCode, pointer } from "@kit.InputKit";
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { window as arkWindow, CursorController } from '@kit.ArkUI';
@@ -313,6 +313,14 @@ struct FloatPage {
     .height('100%')
     .backgroundColor(Color.Transparent)
     .onKeyPreIme((event: KeyEvent) => {
+      // Block native clipboard shortcuts when with_clipboard(false) (ohos-webview-flag-clipboard)
+      if (event.type === KeyType.Down && this.acceleratorMatcher.matchesClipboardShortcut(event) && !isClipboardEnabled(this.windowId)) {
+        return true;
+      }
+      // Block native zoom hotkeys when with_zoom_hotkeys(false) (ohos-webview-flag-zoom-hotkeys)
+      if (event.type === KeyType.Down && this.acceleratorMatcher.matchesZoomShortcut(event) && !isZoomHotkeysEnabled(this.windowId)) {
+        return true;
+      }
       if (event.type === KeyType.Down && this.acceleratorMatcher.matches(event)) {
         const matchedItem = this.acceleratorMatcher.getMatchedItem();
         if (matchedItem) {

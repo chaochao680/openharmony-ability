@@ -1,6 +1,6 @@
 import { DefaultXComponent } from "./DefaultXComponent";
 import { Loadable } from "../helper/loadable";
-import { AcceleratorMatcher } from "../helper/accelerator_matcher";
+import { AcceleratorMatcher, isClipboardEnabled, isZoomHotkeysEnabled } from "../helper/accelerator_matcher";
 import {
   MenuBarComponent,
   getMenuClickHandler,
@@ -11,6 +11,8 @@ import { KeyCode } from "@kit.InputKit";
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { DOMAIN, MAIN_WINDOW_ID } from '../helper/constants';
 import { WindowManager } from '../window/WindowManager';
+import { NativeModuleLoader } from "../runtime/NativeModuleLoader";
+import { invokeNativeBackPressInterceptor } from "../runtime/BackPress";
 
 export const RouteName = "NativeAbility";
 
@@ -19,11 +21,8 @@ export const RouteName = "NativeAbility";
 struct MainPage {
   @StorageProp("moduleName") moduleNames: string | string[] = "";
   // Subsequent UIAbility instances receive their windowId via LocalStorage
-  // (set by NativeAbility.onWindowStageCreate → loadContentByName(storage)).
-  // First instance has no LocalStorage windowId — defaults to 0.
   @LocalStorageProp('windowId') windowId: number = MAIN_WINDOW_ID;
 
-  // loadMode is immutable after onCreate, no need for @StorageProp reactive binding
   private loadMode: "async" | "sync" = "async";
 
   @State private nativeModule: ESObject | null = null;
@@ -36,7 +35,6 @@ struct MainPage {
     this.loadMode = (AppStorage.get<string>("loadMode") as "async" | "sync") ?? "async";
     hilog.info(DOMAIN, 'MainPage', 'Initializing MAIN WINDOW');
 
-    // Main window specific logic: load Native Module
     const moduleName = Loadable.resolvePrimaryModuleName(this.moduleNames);
     if (!moduleName) {
       hilog.error(DOMAIN, 'MainPage', 'moduleName is empty, cannot initialize main window');
@@ -52,7 +50,6 @@ struct MainPage {
   }
 
   onBackPress(): boolean {
-    // Main window specific: handle back button interception
     try {
       if (typeof this.nativeModule?.onBackPressIntercept === "function") {
         return this.nativeModule.onBackPressIntercept();
@@ -89,6 +86,14 @@ struct MainPage {
       }.width("100%").height("100%")
       .backgroundColor(Color.Transparent)
       .onKeyPreIme((event: KeyEvent) => {
+        // Block native clipboard shortcuts when with_clipboard(false) (ohos-webview-flag-clipboard)
+        if (event.type === KeyType.Down && this.acceleratorMatcher.matchesClipboardShortcut(event) && !isClipboardEnabled(MAIN_WINDOW_ID)) {
+          return true;
+        }
+        // Block native zoom hotkeys when with_zoom_hotkeys(false) (ohos-webview-flag-zoom-hotkeys)
+        if (event.type === KeyType.Down && this.acceleratorMatcher.matchesZoomShortcut(event) && !isZoomHotkeysEnabled(MAIN_WINDOW_ID)) {
+          return true;
+        }
         // Accelerator matching (non-clipboard shortcuts)
         if (event.type === KeyType.Down && this.acceleratorMatcher.matches(event)) {
           const matchedItem = this.acceleratorMatcher.getMatchedItem();
@@ -113,6 +118,11 @@ struct MainPage {
     }
     .width('100%')
     .height('100%')
+    // Extend content into system safe areas (status bar + navigation bar).
+    // Without this, setWindowLayoutFullScreen(true) + white window background
+    // causes a white bar at the bottom where the navigation bar area is not
+    // covered by any component (ArkUI default safeArea avoidance).
+    .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
     .backgroundColor(Color.Transparent)
     // Track user touch for tray menu window targeting (D8: migrated from DefaultXComponent).
     // ArkUI onTouch bubbles from child to parent, covering MenuBarComponent + webview + all children.

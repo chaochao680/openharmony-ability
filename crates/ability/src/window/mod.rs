@@ -1,8 +1,14 @@
+//! OpenHarmony window operations.
+//!
+//! Window operations go through the typed bridge facade `WindowClient` in the
+//! `plugin-window` crate (e.g. `app.window()?.focus_window(id).await`). Window
+//! creation uses `create_os_window` / `WindowCreateParams` — a runtime
+//! integration-layer API consumed directly by the embedding runtime.
+
 use napi_ohos::bindgen_prelude::*;
 use napi_ohos::threadsafe_function::{ThreadsafeCallContext, ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi_derive_ohos::napi;
 use napi_ohos::Env;
-use crate::{get_helper, get_main_thread_env};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::OnceLock;
 
@@ -70,587 +76,152 @@ pub fn generate_window_id() -> i64 {
 /// Uses `WindowCreateParams` to pass all window attributes (geometry, decorations,
 /// transparent, background_color) in a single struct, avoiding signature bloat
 /// as Phase 2/3 add more parameters.
+///
+/// Pre-allocates a unique window ID, then fires a TSFN to trigger async sub-window
+/// creation on the ArkTS main thread (fire-and-forget). The sub-window is guaranteed
+/// to be ready before the webview bridge create arrives, since both operations are
+/// serialized on the ArkTS UI thread and createSubWindow is dispatched first.
 pub fn create_os_window(params: WindowCreateParams) -> napi_ohos::Result<i64> {
-    // 1. Synchronously allocate a unique ID
     let id = NEXT_WINDOW_ID.fetch_add(1, Ordering::SeqCst);
-    crate::info!("Pre-allocated window ID: {}", id);
+    crate::info!("create_os_window: Pre-allocated window ID: {}", id);
 
-    let ret = unsafe { get_helper() };
-    if let Some(h) = ret.borrow().as_ref() {
-        if let Some(env) = get_main_thread_env().borrow().as_ref() {
-            let obj = h.get_value(env).map_err(|e| {
-                crate::error!("Failed to get helper object value: {:?}", e);
-                e
-            })?;
-
-            let func =
-                match obj.get_named_property::<Function<'_, Object, Unknown>>("createOSWindow") {
-                    Ok(f) => f,
-                    Err(e) => {
-                        crate::error!("Property 'createOSWindow' NOT FOUND on helper: {:?}", e);
-                        return Err(e);
-                    }
-                };
-
-            crate::info!("Successfully found createOSWindow, building config object...");
-
-            // 2. Create config object with all parameters
-            let mut config = Object::new(env)?;
-            config.set("name", params.name)?;
-            // Note: "type" field is deprecated and no longer sent (OHOS createSubWindow only uses name)
-            config.set("windowId", id)?;
-            config.set("width", params.width)?;
-            config.set("height", params.height)?;
-            config.set("x", params.x)?;
-            config.set("y", params.y)?;
-            // Phase 2: decorations
-            config.set("decorations", params.decorations)?;
-            // Phase 3: transparent + backgroundColor
-            config.set("transparent", params.transparent)?;
-            if let Some(color) = params.background_color {
-                config.set("backgroundColor", color)?;
-            }
-
-            crate::info!("Calling ArkTS with config object...");
-
-            // 3. Call ArkTS and return the ID on success
-            match func.call(config) {
-                Ok(_) => {
-                    crate::info!("ArkTS call succeeded, returning ID: {}", id);
-                    return Ok(id);
-                }
-                Err(e) => {
-                    crate::error!("ArkTS call failed: {:?}", e);
-                    return Err(e);
-                }
-            }
-        } else {
-            crate::error!("Main thread env not available");
+    let tsfn = match TSFN_CREATE_SUB_WINDOW.get() {
+        Some(tsfn) => tsfn,
+        None => {
+            crate::error!(
+                "create_os_window: TSFN not initialized (register_create_sub_window_tsfn not called)"
+            );
+            return Err(Error::from_reason(
+                "create_sub_window TSFN not initialized",
+            ));
         }
-    } else {
-        crate::error!("Helper object not initialized");
+    };
+
+    let status = tsfn.call(
+        (
+            params.name,
+            id,
+            params.width,
+            params.height,
+            params.x,
+            params.y,
+            params.decorations,
+            params.transparent,
+            params.background_color,
+        ),
+        ThreadsafeFunctionCallMode::NonBlocking,
+    );
+
+    if status != Status::Ok {
+        crate::error!("create_os_window: TSFN dispatch failed: {:?}", status);
+        return Err(Error::from_reason(format!(
+            "TSFN call failed: {:?}",
+            status
+        )));
     }
-    Err(Error::from_reason("Helper or Env not initialized"))
+
+    crate::info!(
+        "create_os_window: Dispatched ArkTS createSubWindow for ID: {}",
+        id
+    );
+    Ok(id)
 }
-
-/// Sets window decorations (title bar visibility) at runtime via NAPI.
-///
-/// Calls ArkTS `setWindowDecorations(windowId, decorations)` handler which
-/// updates LocalStorage → FloatPage `@LocalStorageProp` reactive re-render.
-///
-/// Phase 2 implementation.
-pub fn set_window_decorations(window_id: i64, decorations: bool) -> napi_ohos::Result<()> {
-    let ret = unsafe { get_helper() };
-    if let Some(h) = ret.borrow().as_ref() {
-        if let Some(env) = get_main_thread_env().borrow().as_ref() {
-            let obj = h.get_value(env).map_err(|e| {
-                crate::error!("Failed to get helper object value: {:?}", e);
-                e
-            })?;
-
-            let func =
-                obj.get_named_property::<Function<'_, FnArgs<(i64, bool)>, ()>>("setWindowDecorations")?;
-            func.call(FnArgs { data: (window_id, decorations) })?;
-            return Ok(());
-        } else {
-            crate::error!("Main thread env not available");
-        }
-    } else {
-        crate::error!("Helper object not initialized");
-    }
-    Err(Error::from_reason("Helper or Env not initialized"))
-}
-
-/// Sets window background color at runtime via NAPI.
-///
-/// Calls ArkTS `setWindowBackgroundColor(windowId, color)` handler which
-/// calls OHOS `window.Window.setWindowBackgroundColor('#AARRGGBB')`.
-///
-/// `color` is in `0xAARRGGBB` format (e.g., `0x00000000` = fully transparent).
-///
-/// Phase 3 implementation.
 
 // ─── TSFN for cross-thread vibrancy calls (threadsafe, no main-thread Env needed) ───
 // Fire-and-forget (NonBlocking, no return value wait): applyWindowBlur queues pendingBlurs
 // (build-time inject via registerController) or calls setAllWebviewsBlurRadius (runtime
 // modifier refresh), both idempotent, so no synchronous result needed.
-type SetWindowBlurTsfn = ThreadsafeFunction<(i64, f64), (), FnArgs<(i64, f64)>, Status, false>;
-type SetWindowBgColorTsfn = ThreadsafeFunction<(i64, u32), (), FnArgs<(i64, u32)>, Status, false>;
 
-static TSFN_SET_WINDOW_BLUR: OnceLock<SetWindowBlurTsfn> = OnceLock::new();
-static TSFN_SET_WINDOW_BG_COLOR: OnceLock<SetWindowBgColorTsfn> = OnceLock::new();
+// ─── TSFN for cross-thread sub-window creation (fire-and-forget) ───
+// ArkTS registers WindowManager.createSubWindow wrapper via register_create_sub_window_tsfn
+// during ProcessInitializer.initialize(). create_os_window calls this TSFN to trigger
+// async sub-window creation on the ArkTS main thread, returning the pre-allocated ID
+// immediately without waiting for ArkTS to finish (the sub-window is guaranteed to be
+// ready before the webview bridge create arrives, since both are serialized on the
+// ArkTS UI thread event loop and createSubWindow is dispatched first).
+type CreateSubWindowTsfn = ThreadsafeFunction<
+    (String, i64, i32, i32, i32, i32, bool, bool, Option<u32>),
+    (),
+    FnArgs<(Object<'static>, )>,
+    Status,
+    false,
+>;
+static TSFN_CREATE_SUB_WINDOW: OnceLock<CreateSubWindowTsfn> = OnceLock::new();
 
-/// Initialize vibrancy ThreadsafeFunctions. Must be called on ArkTS main thread (during
-/// ArkHelper setup, like init_clipboard_tsfn). After init, set_window_blur /
-/// set_window_background_color are callable from any thread (TSFN is threadsafe, does not
-/// need the thread_local MAIN_THREAD_ENV, so no run_on_main_thread required).
-pub fn init_vibrancy_tsfn(env: &Env) -> Result<()> {
-    if TSFN_SET_WINDOW_BLUR.get().is_some() {
+/// Register the ArkTS `createSubWindow` wrapper as a ThreadsafeFunction.
+///
+/// Called from `ProcessInitializer.initialize()` after native modules are loaded.
+/// The ArkTS wrapper is an arrow function that captures `WindowManager.getInstance()`
+/// and calls `createSubWindow(config)`, returning a `Promise<number>`.
+///
+/// After registration, `create_os_window` can fire-and-forget sub-window creation
+/// from any thread (TSFN is threadsafe).
+#[napi(ts_args_type = "createFn: (config: ESObject) => Promise<number>")]
+pub fn register_create_sub_window_tsfn(_env: Env, create_fn: Function<'static, Object<'static>, ()>) -> Result<()> {
+    if TSFN_CREATE_SUB_WINDOW.get().is_some() {
+        crate::info!("create_sub_window TSFN already registered");
         return Ok(());
     }
-    let helper_obj = {
-        let helper_rc = unsafe { get_helper() };
-        let helper_guard = helper_rc.borrow();
-        let helper_ref = helper_guard
-            .as_ref()
-            .ok_or_else(|| Error::from_reason("ArkHelper not initialized"))?;
-        helper_ref.get_value(env)?
-    };
-
-    let blur_fn: Function<'_, FnArgs<(i64, f64)>, ()> = helper_obj
-        .get_named_property("setWindowBlur")
-        .map_err(|e| Error::from_reason(format!("setWindowBlur not found: {}", e)))?;
-    let blur_tsfn = blur_fn
-        .build_threadsafe_function::<(i64, f64)>()
+    let tsfn = create_fn
+        .build_threadsafe_function::<(String, i64, i32, i32, i32, i32, bool, bool, Option<u32>)>()
         .callee_handled::<false>()
-        .build_callback(move |ctx: ThreadsafeCallContext<(i64, f64)>| {
-            Ok(FnArgs { data: ctx.value })
-        })?;
-    let _ = TSFN_SET_WINDOW_BLUR.set(blur_tsfn);
-
-    let bg_fn: Function<'_, FnArgs<(i64, u32)>, ()> = helper_obj
-        .get_named_property("setWindowBackgroundColor")
-        .map_err(|e| Error::from_reason(format!("setWindowBackgroundColor not found: {}", e)))?;
-    let bg_tsfn = bg_fn
-        .build_threadsafe_function::<(i64, u32)>()
-        .callee_handled::<false>()
-        .build_callback(move |ctx: ThreadsafeCallContext<(i64, u32)>| {
-            Ok(FnArgs { data: ctx.value })
-        })?;
-    let _ = TSFN_SET_WINDOW_BG_COLOR.set(bg_tsfn);
-
+        .build_callback(
+            move |ctx: ThreadsafeCallContext<(
+                String,
+                i64,
+                i32,
+                i32,
+                i32,
+                i32,
+                bool,
+                bool,
+                Option<u32>,
+            )>| {
+                build_create_sub_window_args(ctx.env, ctx.value)
+                    .map(|args| FnArgs { data: args })
+            },
+        )?;
+    let _ = TSFN_CREATE_SUB_WINDOW.set(tsfn);
+    crate::info!("Registered create_sub_window TSFN");
     Ok(())
 }
 
-/// Sets window background color via TSFN (threadsafe, callable from any thread).
-pub fn set_window_background_color(window_id: i64, color: u32) -> napi_ohos::Result<()> {
-    let tsfn = TSFN_SET_WINDOW_BG_COLOR.get()
-        .ok_or_else(|| Error::from_reason("set_window_background_color TSFN not initialized"))?;
-    let status = tsfn.call((window_id, color), ThreadsafeFunctionCallMode::NonBlocking);
-    if status != Status::Ok {
-        return Err(Error::from_reason(format!("TSFN call failed: {:?}", status)));
+/// TSFN callback helper (runs on ArkTS main thread).
+/// Builds a WindowConfig Object from the flattened parameter tuple.
+fn build_create_sub_window_args(
+    env: Env,
+    value: (String, i64, i32, i32, i32, i32, bool, bool, Option<u32>),
+) -> Result<(Object<'static>,)> {
+    let (name, window_id, width, height, x, y, decorations, transparent, bg_color) = value;
+    let mut config = Object::new(&env)?;
+    config.set("name", name)?;
+    config.set("windowId", window_id)?;
+    config.set("width", width)?;
+    config.set("height", height)?;
+    config.set("x", x)?;
+    config.set("y", y)?;
+    config.set("decorations", decorations)?;
+    config.set("transparent", transparent)?;
+    if let Some(color) = bg_color {
+        config.set("backgroundColor", color)?;
     }
-    Ok(())
+    Ok((config,))
 }
 
-/// Sets window blur radius via TSFN (threadsafe, callable from any thread).
-///
-/// Calls ArkTS `setWindowBlur(windowId, radius)` handler which applies
-/// `backdropBlur(radius)` to the WebView container component.
-///
-/// `radius` is the blur radius in pixels (0 = no blur).
-pub fn set_window_blur(window_id: i64, radius: f64) -> napi_ohos::Result<()> {
-    let tsfn = TSFN_SET_WINDOW_BLUR.get()
-        .ok_or_else(|| Error::from_reason("set_window_blur TSFN not initialized"))?;
-    let status = tsfn.call((window_id, radius), ThreadsafeFunctionCallMode::NonBlocking);
-    if status != Status::Ok {
-        return Err(Error::from_reason(format!("TSFN call failed: {:?}", status)));
-    }
-    Ok(())
-}
-
-/// Brings a Float sub-window to the front and focuses it.
-///
-/// Calls ArkTS `focusWindow(windowId)` which calls OHOS `window.Window.raiseToAppTop()`.
-/// Requires OHOS API 14+.
-///
-/// **Note**: This is a fire-and-forget call — the ArkTS `raiseToAppTop()` is async,
-/// but this function returns `Ok(())` synchronously after dispatching the NAPI call.
-/// If the ArkTS side fails, the error is logged via `hilog` but not propagated to Rust.
-/// For the main window (windowId = 0), this is a no-op (focus is OS-managed).
-pub fn focus_window(window_id: i64) -> napi_ohos::Result<()> {
-    let ret = unsafe { get_helper() };
-    if let Some(h) = ret.borrow().as_ref() {
-        if let Some(env) = get_main_thread_env().borrow().as_ref() {
-            let obj = h.get_value(env).map_err(|e| {
-                crate::error!("Failed to get helper object value: {:?}", e);
-                e
-            })?;
-
-            let func = obj.get_named_property::<Function<'_, i64, ()>>("focusWindow")?;
-            func.call(window_id)?;
-            return Ok(());
-        } else {
-            crate::error!("Main thread env not available");
-        }
-    } else {
-        crate::error!("Helper object not initialized");
-    }
-    Err(Error::from_reason("Helper or Env not initialized"))
-}
-
-/// Sets whether a Float sub-window can receive focus.
-///
-/// Calls ArkTS `setWindowFocusable(windowId, focusable)` which calls
-/// OHOS `window.Window.setWindowFocusable(isFocusable)`.
-pub fn set_window_focusable(window_id: i64, focusable: bool) -> napi_ohos::Result<()> {
-    let ret = unsafe { get_helper() };
-    if let Some(h) = ret.borrow().as_ref() {
-        if let Some(env) = get_main_thread_env().borrow().as_ref() {
-            let obj = h.get_value(env).map_err(|e| {
-                crate::error!("Failed to get helper object value: {:?}", e);
-                e
-            })?;
-
-            let func =
-                obj.get_named_property::<Function<'_, FnArgs<(i64, bool)>, ()>>("setWindowFocusable")?;
-            func.call(FnArgs { data: (window_id, focusable) })?;
-            return Ok(());
-        } else {
-            crate::error!("Main thread env not available");
-        }
-    } else {
-        crate::error!("Helper object not initialized");
-    }
-    Err(Error::from_reason("Helper or Env not initialized"))
-}
-
-// ============================================================================
-// Window operations (ohos-window-ops)
-// Fire-and-forget (dispatch async Promise, return Ok(()) immediately),
-// mirroring focus_window. is_window_maximized/is_window_minimized are
-// synchronous queries returning bool via getWindowStatus().
-// ============================================================================
-
-/// Moves a window to (x, y) via ArkTS `moveWindowTo(windowId, x, y)` → `win.moveWindowTo(x, y)`.
-pub fn move_window_to(window_id: i64, x: i64, y: i64) -> napi_ohos::Result<()> {
-    let ret = unsafe { get_helper() };
-    if let Some(h) = ret.borrow().as_ref() {
-        if let Some(env) = get_main_thread_env().borrow().as_ref() {
-            let obj = h.get_value(env).map_err(|e| { crate::error!("Failed to get helper: {:?}", e); e })?;
-            let func = obj.get_named_property::<Function<'_, Object, ()>>("moveWindowTo")?;
-            let mut params = Object::new(env)?;
-            params.set("windowId", window_id)?;
-            params.set("x", x)?;
-            params.set("y", y)?;
-            func.call(params)?;
-            return Ok(());
-        } else { crate::error!("Main thread env not available"); }
-    } else { crate::error!("Helper object not initialized"); }
-    Err(Error::from_reason("Helper or Env not initialized"))
-}
-
-/// Resizes a window via ArkTS `resizeWindow(windowId, w, h)` → `win.resize(w, h)`.
-pub fn resize_window(window_id: i64, width: i64, height: i64) -> napi_ohos::Result<()> {
-    let ret = unsafe { get_helper() };
-    if let Some(h) = ret.borrow().as_ref() {
-        if let Some(env) = get_main_thread_env().borrow().as_ref() {
-            let obj = h.get_value(env).map_err(|e| { crate::error!("Failed to get helper: {:?}", e); e })?;
-            let func = obj.get_named_property::<Function<'_, Object, ()>>("resizeWindow")?;
-            let mut params = Object::new(env)?;
-            params.set("windowId", window_id)?;
-            params.set("width", width)?;
-            params.set("height", height)?;
-            func.call(params)?;
-            return Ok(());
-        } else { crate::error!("Main thread env not available"); }
-    } else { crate::error!("Helper object not initialized"); }
-    Err(Error::from_reason("Helper or Env not initialized"))
-}
-
-/// Minimizes a window via ArkTS `minimizeWindow(windowId)` → `win.minimize()`.
-pub fn minimize_window(window_id: i64) -> napi_ohos::Result<()> {
-    let ret = unsafe { get_helper() };
-    if let Some(h) = ret.borrow().as_ref() {
-        if let Some(env) = get_main_thread_env().borrow().as_ref() {
-            let obj = h.get_value(env).map_err(|e| { crate::error!("Failed to get helper: {:?}", e); e })?;
-            let func = obj.get_named_property::<Function<'_, i64, ()>>("minimizeWindow")?;
-            func.call(window_id)?;
-            return Ok(());
-        } else { crate::error!("Main thread env not available"); }
-    } else { crate::error!("Helper object not initialized"); }
-    Err(Error::from_reason("Helper or Env not initialized"))
-}
-
-/// Maximizes a window via ArkTS `maximizeWindow(windowId)` → `win.maximize(MaximizePresentation.EXIT_IMMERSIVE)`.
-/// EXIT_IMMERSIVE yields a true MAXIMIZE state (default ENTER_IMMERSIVE enters FULL_SCREEN).
-pub fn maximize_window(window_id: i64) -> napi_ohos::Result<()> {
-    let ret = unsafe { get_helper() };
-    if let Some(h) = ret.borrow().as_ref() {
-        if let Some(env) = get_main_thread_env().borrow().as_ref() {
-            let obj = h.get_value(env).map_err(|e| { crate::error!("Failed to get helper: {:?}", e); e })?;
-            let func = obj.get_named_property::<Function<'_, i64, ()>>("maximizeWindow")?;
-            func.call(window_id)?;
-            return Ok(());
-        } else { crate::error!("Main thread env not available"); }
-    } else { crate::error!("Helper object not initialized"); }
-    Err(Error::from_reason("Helper or Env not initialized"))
-}
-
-/// Restores a window from minimized state via ArkTS `restoreWindow(windowId)` → `win.restore()`.
-/// API14+ only (restore is API14). On API < 14, no-op + warn.
-/// Note: restore() only restores from MINIMIZE, NOT from MAXIMIZE.
-pub fn restore_window(window_id: i64) -> napi_ohos::Result<()> {
-    if crate::version::sdk_api_version() < 14 {
-        log::warn!(
-            "[ohos-window] restore() requires API14+, current API {}; no-op",
-            crate::version::sdk_api_version()
-        );
-        return Ok(());
-    }
-    let ret = unsafe { get_helper() };
-    if let Some(h) = ret.borrow().as_ref() {
-        if let Some(env) = get_main_thread_env().borrow().as_ref() {
-            let obj = h.get_value(env).map_err(|e| { crate::error!("Failed to get helper: {:?}", e); e })?;
-            let func = obj.get_named_property::<Function<'_, i64, ()>>("restoreWindow")?;
-            func.call(window_id)?;
-            return Ok(());
-        } else { crate::error!("Main thread env not available"); }
-    } else { crate::error!("Helper object not initialized"); }
-    Err(Error::from_reason("Helper or Env not initialized"))
-}
-
-/// Recovers a window from maximized/fullscreen to floating via ArkTS `recoverWindow(windowId)` → `win.recover()`.
-/// API 7+, public. Switches MAXIMIZE/FULL_SCREEN → FLOATING, restoring previous size/position.
-pub fn recover_window(window_id: i64) -> napi_ohos::Result<()> {
-    let ret = unsafe { get_helper() };
-    if let Some(h) = ret.borrow().as_ref() {
-        if let Some(env) = get_main_thread_env().borrow().as_ref() {
-            let obj = h.get_value(env).map_err(|e| { crate::error!("Failed to get helper: {:?}", e); e })?;
-            let func = obj.get_named_property::<Function<'_, i64, ()>>("recoverWindow")?;
-            func.call(window_id)?;
-            return Ok(());
-        } else { crate::error!("Main thread env not available"); }
-    } else { crate::error!("Helper object not initialized"); }
-    Err(Error::from_reason("Helper or Env not initialized"))
-}
-
-/// Shows a window via ArkTS `showWindowMethod(windowId)` → `win.showWindow()`.
-/// Note: showWindow only restores hidden subwindows, not minimized main windows.
-pub fn show_window(window_id: i64) -> napi_ohos::Result<()> {
-    let ret = unsafe { get_helper() };
-    if let Some(h) = ret.borrow().as_ref() {
-        if let Some(env) = get_main_thread_env().borrow().as_ref() {
-            let obj = h.get_value(env).map_err(|e| { crate::error!("Failed to get helper: {:?}", e); e })?;
-            let func = obj.get_named_property::<Function<'_, i64, ()>>("showWindowMethod")?;
-            func.call(window_id)?;
-            return Ok(());
-        } else { crate::error!("Main thread env not available"); }
-    } else { crate::error!("Helper object not initialized"); }
-    Err(Error::from_reason("Helper or Env not initialized"))
-}
-
-/// Destroys/closes a window via ArkTS `closeWindow(windowId)`:
-/// - Float sub-window: `win.destroyWindow()` (real destroy, removes from screen).
-/// - UIAbility main window: `hideAbility()` (background, OHOS doesn't allow
-///   programmatic Ability kill; instance stays in recent tasks but becomes invisible).
-///
-/// This is the real OHOS window destruction — tao's `Window::close` is a no-op on
-/// OHOS (doesn't call destroyWindow), so `WebviewWindow::close()` removes the
-/// window from Rust's manager but leaves the system window visible on screen.
-/// Callers that need the system window actually gone must call this explicitly.
-pub fn destroy_window(window_id: i64) -> napi_ohos::Result<()> {
-    log::info!("[ohos-window] destroy_window wid={} ENTER (sync)", window_id);
-    let ret = unsafe { get_helper() };
-    if let Some(h) = ret.borrow().as_ref() {
-        if let Some(env) = get_main_thread_env().borrow().as_ref() {
-            let obj = h.get_value(env).map_err(|e| { crate::error!("Failed to get helper: {:?}", e); e })?;
-            let func = obj.get_named_property::<Function<'_, i64, ()>>("closeWindow")?;
-            func.call(window_id)?;
-            log::info!("[ohos-window] destroy_window wid={} ArkHelper.closeWindow called OK", window_id);
-            return Ok(());
-        } else { log::error!("[ohos-window] destroy_window wid={} Main thread env not available", window_id); }
-    } else { log::error!("[ohos-window] destroy_window wid={} Helper not initialized", window_id); }
-    Err(Error::from_reason("Helper or Env not initialized"))
-}
-
-/// Queries whether a window is maximized via ArkTS `isMaximized(windowId)` →
-/// `win.getWindowStatus() === window.WindowStatusType.MAXIMIZE`.
-/// Synchronous (getWindowStatus is a sync getter, API12).
-pub fn is_window_maximized(window_id: i64) -> napi_ohos::Result<bool> {
-    let ret = unsafe { get_helper() };
-    if let Some(h) = ret.borrow().as_ref() {
-        if let Some(env) = get_main_thread_env().borrow().as_ref() {
-            let obj = h.get_value(env).map_err(|e| { crate::error!("Failed to get helper: {:?}", e); e })?;
-            let func = obj.get_named_property::<Function<'_, i64, bool>>("isMaximized")?;
-            return func.call(window_id);
-        } else { crate::error!("Main thread env not available"); }
-    } else { crate::error!("Helper object not initialized"); }
-    Err(Error::from_reason("Helper or Env not initialized"))
-}
-
-/// Queries whether a window is minimized via ArkTS `isMinimized(windowId)` →
-/// `win.getWindowStatus() === window.WindowStatusType.MINIMIZE`.
-/// Synchronous (getWindowStatus is a sync getter, API12).
-pub fn is_window_minimized(window_id: i64) -> napi_ohos::Result<bool> {
-    let ret = unsafe { get_helper() };
-    if let Some(h) = ret.borrow().as_ref() {
-        if let Some(env) = get_main_thread_env().borrow().as_ref() {
-            let obj = h.get_value(env).map_err(|e| { crate::error!("Failed to get helper: {:?}", e); e })?;
-            let func = obj.get_named_property::<Function<'_, i64, bool>>("isMinimized")?;
-            return func.call(window_id);
-        } else { crate::error!("Main thread env not available"); }
-    } else { crate::error!("Helper object not initialized"); }
-    Err(Error::from_reason("Helper or Env not initialized"))
-}
-
-// ─── Group A completion: hide / fullscreen / ignore cursor ──────────────────────────────
+// ─── Group A: fullscreen ──────────────────────────────────────
 // Multi-arg (2+) parameters must be wrapped with FnArgs (a bare tuple is
 // passed as a single argument; see napi-ohos JsValuesTupleIntoVec blanket
 // impl). Single-arg func.call(id) is unaffected.
 
-/// `set_visible(false)` → main window hideAbility; sub-window minimize (OHOS has no standalone hide API).
-pub fn hide_window(window_id: i64) -> napi_ohos::Result<()> {
-    let ret = unsafe { get_helper() };
-    if let Some(h) = ret.borrow().as_ref() {
-        if let Some(env) = get_main_thread_env().borrow().as_ref() {
-            let obj = h.get_value(env).map_err(|e| { crate::error!("Failed to get helper: {:?}", e); e })?;
-            let func = obj.get_named_property::<Function<'_, i64, ()>>("hideWindow")?;
-            func.call(window_id)?;
-            return Ok(());
-        } else { crate::error!("Main thread env not available"); }
-    } else { crate::error!("Helper object not initialized"); }
-    Err(Error::from_reason("Helper or Env not initialized"))
-}
-
-/// `set_fullscreen` → setWindowLayoutFullScreen + setWindowSystemBarEnable([]).
-pub fn set_fullscreen(window_id: i64, on: bool) -> napi_ohos::Result<()> {
-    log::info!("[ohos-window] set_fullscreen ENTER wid={} on={}", window_id, on);
-    let ret = unsafe { get_helper() };
-    if let Some(h) = ret.borrow().as_ref() {
-        if let Some(env) = get_main_thread_env().borrow().as_ref() {
-            let obj = h.get_value(env).map_err(|e| { crate::error!("Failed to get helper: {:?}", e); e })?;
-            let func = obj.get_named_property::<Function<'_, FnArgs<(i64, bool)>, ()>>("setFullscreen")?;
-            func.call(FnArgs { data: (window_id, on) })?;
-            log::info!("[ohos-window] set_fullscreen wid={} ArkHelper.setFullscreen called OK", window_id);
-            return Ok(());
-        } else { log::error!("[ohos-window] set_fullscreen wid={} Main thread env not available", window_id); }
-    } else { log::error!("[ohos-window] set_fullscreen wid={} Helper not initialized", window_id); }
-    Err(Error::from_reason("Helper or Env not initialized"))
-}
-
-/// `set_ignore_cursor_events` → setWindowTouchable (touchable = !ignore).
-pub fn set_window_touchable(window_id: i64, touchable: bool) -> napi_ohos::Result<()> {
-    let ret = unsafe { get_helper() };
-    if let Some(h) = ret.borrow().as_ref() {
-        if let Some(env) = get_main_thread_env().borrow().as_ref() {
-            let obj = h.get_value(env).map_err(|e| { crate::error!("Failed to get helper: {:?}", e); e })?;
-            let func = obj.get_named_property::<Function<'_, FnArgs<(i64, bool)>, ()>>("setWindowTouchable")?;
-            func.call(FnArgs { data: (window_id, touchable) })?;
-            return Ok(());
-        } else { crate::error!("Main thread env not available"); }
-    } else { crate::error!("Helper object not initialized"); }
-    Err(Error::from_reason("Helper or Env not initialized"))
-}
-
-// ─── Group D: decoration button availability (FloatPage LocalStorage) ──────────────────────────
-// Bitfield: bit0 closable, bit1 maximizable, bit2 minimizable, bit3 resizable.
-// Default 0b1111=15. Only effective for Float sub-windows; no-op for main window.
-pub fn set_window_decoration_flags(window_id: i64, flags: u8) -> napi_ohos::Result<()> {
-    let ret = unsafe { get_helper() };
-    if let Some(h) = ret.borrow().as_ref() {
-        if let Some(env) = get_main_thread_env().borrow().as_ref() {
-            let obj = h.get_value(env).map_err(|e| { crate::error!("Failed to get helper: {:?}", e); e })?;
-            let func = obj.get_named_property::<Function<'_, FnArgs<(i64, u8)>, ()>>("setWindowDecorationFlags")?;
-            func.call(FnArgs { data: (window_id, flags) })?;
-            return Ok(());
-        } else { crate::error!("Main thread env not available"); }
-    } else { crate::error!("Helper object not initialized"); }
-    Err(Error::from_reason("Helper or Env not initialized"))
-}
-
-// ─── Group E: cursor visibility / icon (@ohos.multimodalInput.pointer) ─────────────────
-/// `set_cursor_visible` → pointer.setPointerVisible (global).
-pub fn set_pointer_visible(visible: bool) -> napi_ohos::Result<()> {
-    let ret = unsafe { get_helper() };
-    if let Some(h) = ret.borrow().as_ref() {
-        if let Some(env) = get_main_thread_env().borrow().as_ref() {
-            let obj = h.get_value(env).map_err(|e| { crate::error!("Failed to get helper: {:?}", e); e })?;
-            let func = obj.get_named_property::<Function<'_, bool, ()>>("setPointerVisible")?;
-            func.call(visible)?;
-            return Ok(());
-        } else { crate::error!("Main thread env not available"); }
-    } else { crate::error!("Helper object not initialized"); }
-    Err(Error::from_reason("Helper or Env not initialized"))
-}
-
-/// `set_cursor_icon` → pointer.setPointerStyleSync(windowId, PointerStyle).
-/// `style` is an OHOS PointerStyle enum value (mapped from tao's CursorIcon).
-pub fn set_pointer_style(window_id: i64, style: i32) -> napi_ohos::Result<()> {
-    let ret = unsafe { get_helper() };
-    if let Some(h) = ret.borrow().as_ref() {
-        if let Some(env) = get_main_thread_env().borrow().as_ref() {
-            let obj = h.get_value(env).map_err(|e| { crate::error!("Failed to get helper: {:?}", e); e })?;
-            let func = obj.get_named_property::<Function<'_, FnArgs<(i64, i32)>, ()>>("setPointerStyle")?;
-            func.call(FnArgs { data: (window_id, style) })?;
-            return Ok(());
-        } else { crate::error!("Main thread env not available"); }
-    } else { crate::error!("Helper object not initialized"); }
-    Err(Error::from_reason("Helper or Env not initialized"))
-}
-
 /// Allocates the next global window ID without creating a window.
 ///
-/// Used by tao when a subsequent UIAbility is created: tao
+/// Used by the windowing backend when a subsequent UIAbility is created: the windowing backend
 /// pre-allocates an ID, passes it to the new EntryAbility instance via
 /// `want.parameters`, then calls `start_ui_ability`. The new instance's
 /// `onWindowStageCreate` registers its WindowStage against this ID via
 /// `register_ui_ability_stage`.
 pub fn next_window_id() -> i64 {
     NEXT_WINDOW_ID.fetch_add(1, Ordering::SeqCst)
-}
-
-/// Starts a new EntryAbility instance to host a window.
-///
-/// OHOS `context.startAbility(want)` with `abilityName: "EntryAbility"` creates
-/// a new instance of the same EntryAbility class (requires `launchType: standard`
-/// in module.json5). Each instance gets an independent WindowStage / main window /
-/// lifecycle. `windowId` is pre-allocated by tao and carried via `want.parameters`
-/// so the new instance can register its WindowStage against it.
-///
-/// Returns immediately (startAbility is async); the new instance's
-/// `onWindowStageCreate` will call back to register its stage. tao returns
-/// `window_id = Some(id)` right away so wry/WebView creation can proceed — the
-/// `ProxyJsHelper` queue handles the race until the controller is ready.
-pub fn start_ui_ability(
-    window_id: i64,
-    label: String,
-    url: String,
-    multiton: bool,
-    transparent: bool,
-) -> napi_ohos::Result<()> {
-    // The ability name is fixed to "EntryAbility" here — tao (the only caller)
-    // does not need to pass it. openharmony-ability owns this decision so the
-    // ability class name stays a single source of truth.
-    let ability_name = "EntryAbility".to_string();
-    crate::info!(
-        "start_ui_ability: id={}, label={}, ability={}, multiton={}, transparent={}",
-        window_id, label, ability_name, multiton, transparent
-    );
-
-    let ret = unsafe { get_helper() };
-    if let Some(h) = ret.borrow().as_ref() {
-        if let Some(env) = get_main_thread_env().borrow().as_ref() {
-            let obj = h.get_value(env).map_err(|e| {
-                crate::error!("Failed to get helper object value: {:?}", e);
-                e
-            })?;
-
-            let func = obj.get_named_property::<Function<'_, Object, ()>>("startUIAbility")
-                .map_err(|e| {
-                    crate::error!("Property 'startUIAbility' NOT FOUND on helper: {:?}", e);
-                    e
-                })?;
-
-            // Build the want parameter object. ArkTS startUIAbility reads these
-            // and calls context.startAbility({abilityName, parameters: {...}}).
-            let mut want = Object::new(env)?;
-            want.set("abilityName", ability_name)?;
-            want.set("windowId", window_id)?;
-            want.set("label", label)?;
-            want.set("url", url)?;
-            want.set("multiton", multiton)?;
-            want.set("transparent", transparent)?;
-
-            func.call(want)?;
-            return Ok(());
-        } else {
-            crate::error!("Main thread env not available");
-        }
-    } else {
-        crate::error!("Helper object not initialized");
-    }
-    Err(Error::from_reason("Helper or Env not initialized"))
 }
 
 /// Global record of the last windowId reported by a subsequent EntryAbility
