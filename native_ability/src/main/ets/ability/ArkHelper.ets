@@ -2,7 +2,7 @@ import common from "@ohos.app.ability.common";
 import window from "@ohos.window";
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { statusBarManager } from "@kit.DeskTopExtensionKit";
-import { emitter, BusinessError } from "@kit.BasicServicesKit";
+import { emitter, BusinessError, deviceInfo } from "@kit.BasicServicesKit";
 import { notificationManager } from "@kit.NotificationKit";
 import { inputMethod } from "@kit.IMEKit";
 import { image } from "@kit.ImageKit";
@@ -536,11 +536,6 @@ export function createArkHelper(): ArkHelper {
           'tauri_multiton': String(want.multiton),
           'tauri_transparent': String(want.transparent),
         };
-        // instanceKey for specified launchType: unique → new instance, 'main' → reuse
-        const instanceKey = want.instanceKey as string | undefined;
-        if (instanceKey) {
-          params['instanceKey'] = instanceKey;
-        }
         let fullWant: Want = {
           bundleName: context.applicationInfo.name,
           abilityName: want.abilityName,
@@ -827,6 +822,12 @@ export function createArkHelper(): ArkHelper {
       // safeLogError: 本方法经 Rust func.call 同步调用(NAPI 重入上下文),同步段
       // (window-not-found 分支、外层 catch)的 hilog 可能抛 "Argc mismatch"(C5);
       // 异步 .then/.catch 回调不在重入上下文,保留 hilog。
+      // API guard: enableDrag 是 API20+,低版本 win.enableDrag 为 undefined → TypeError,
+      // 对齐同文件的 startMoving(API14)/setWindowTopmost(API14) guard 模式。
+      if (deviceInfo.sdkApiVersion < 20) {
+        safeLogError('setWindowDraggable(api-below-20)', { code: -1, msg: `enableDrag requires API20+, current ${deviceInfo.sdkApiVersion}; no-op` } as ESObject);
+        return;
+      }
       try {
         const win = WindowManager.getInstance().getWindow(windowId);
         if (!win) { safeLogError('setWindowDraggable(window-not-found)', { code: -1, msg: `window ${windowId} not found` } as ESObject); return; }

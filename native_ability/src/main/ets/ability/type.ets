@@ -140,13 +140,12 @@ export interface AccountInfo {
 // Want params for starting a new EntryAbility instance (multi-UIAbility-instance path).
 // Rust NAPI (start_ui_ability) builds this object and passes it to ArkHelper.startUIAbility.
 export interface UIAbilityWantParams {
-  abilityName: string;       // "EntryAbility" — reuse same class, new instance via launchType:specified
+  abilityName: string;       // "EntryAbility" — reuse same class, new instance via launchType:standard
   windowId: number;          // Rust-pre-allocated id (NEXT_WINDOW_ID), carried in want.parameters
   label: string;             // window label, for debugging / routing
   url: string;               // initial URL to load in the new instance's webview
   multiton: boolean;         // reserved: true=standard (new instance each call), false=singleton (onNewWant)
   transparent: boolean;      // if true, new instance sets setWindowContainerColor transparent on its main window
-  instanceKey?: string;      // specified launchType: 'main'=reuse main instance, unique= new instance
 }
 
 export interface ArkHelper {

@@ -934,8 +934,6 @@ pub fn start_ui_ability(
             want.set("url", url)?;
             want.set("multiton", multiton)?;
             want.set("transparent", transparent)?;
-            // instanceKey: unique per call → onAcceptWant returns unique key → new instance
-            want.set("instanceKey", format!("win-{}", window_id))?;
 
             func.call(want)?;
             return Ok(());

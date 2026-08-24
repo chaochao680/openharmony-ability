@@ -590,13 +590,17 @@ export class WindowManager {
   setPointerStyle(windowId: number, style: number): void {
     // pointer.setPointerStyleSync needs the REAL OHOS window ID (from getWindowProperties().id),
     // not tao's placeholder windowId (0 for main window). Passing 0 succeeds but has no effect.
+    // NOTE: called from Rust via NAPI func.call (via ArkHelper.setPointerStyle) — bare hilog
+    // in this sync body throws "Argc mismatch" (NAPI re-entrancy, C5): the success log would
+    // turn a success into a reported failure, and the catch log would swallow the original err.
+    // Use console fallback (same escape hatch as safeLogError / getRealWindowId below).
     const win = this.getWindow(windowId);
-    if (!win) { hilog.warn(DOMAIN, 'WindowManager', 'setPointerStyle: window %{public}d not found', windowId); return; }
+    if (!win) { console.warn(`[WindowManager] setPointerStyle: window ${windowId} not found`); return; }
     try {
       const realWindowId = win.getWindowProperties().id;
       pointer.setPointerStyleSync(realWindowId, style as pointer.PointerStyle);
-      hilog.info(DOMAIN, 'WindowManager', 'setPointerStyle taoId=%{public}d realId=%{public}d style=%{public}d OK', windowId, realWindowId, style);
-    } catch (err) { hilog.warn(DOMAIN, 'WindowManager', 'setPointerStyle %{public}d failed: %{public}s', windowId, JSON.stringify(err)); }
+      console.info(`[WindowManager] setPointerStyle taoId=${windowId} realId=${realWindowId} style=${style} OK`);
+    } catch (err) { console.error(`[WindowManager] setPointerStyle ${windowId} failed: ${JSON.stringify(err)}`); }
   }
 
   // Resolve tao's windowId (0 = main window placeholder) to the REAL OHOS window ID
