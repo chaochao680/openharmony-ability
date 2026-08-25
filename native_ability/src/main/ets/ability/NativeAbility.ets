@@ -11,7 +11,7 @@ import { MenuManager, PredefinedActionExecutor, setPredefinedActionExecutor } fr
 import { AboutMetadataData } from "../helper/menu_types";
 import { setCurrentAbilityName } from "../helper/StatusBarUtils";
 import { WindowManager } from "../window/WindowManager";
-import { DOMAIN } from '../helper/constants';
+import { DOMAIN, NATIVE_MODULE_STORAGE_KEY } from '../helper/constants';
 import { setPrimaryWebviewControllerCallback } from "../components/DefaultXComponent";
 import { ProcessInitializer } from "./ProcessInitializer";
 
@@ -201,6 +201,26 @@ export class NativeAbility extends UIAbility {
             lifecycle.keyboardEventCallback.onKeyboardHeightChange(height),
           );
         });
+        // 回灌系统窗口状态到 tao 镜像位(问题五 5.3):
+        // 最大化/最小化/全屏/悬浮等系统状态变化经 notifyWindowStatus NAPI 入队,
+        // runtime-wry drain 后用真实 windowId 路由到对应 tao Window 更新镜像位。
+        // API 11+;不支持则静默降级(不比现状差)。详见 doc/OHOS窗口遗留问题.md。
+        try {
+          win.on("windowStatusChange", (statusType: window.WindowStatusType) => {
+            const nativeModule: ESObject = AppStorage.get<ESObject>(NATIVE_MODULE_STORAGE_KEY);
+            if (nativeModule && typeof nativeModule.notifyWindowStatus === 'function') {
+              nativeModule.notifyWindowStatus(windowId, statusType);
+            }
+          });
+          // seed 初始态(官方 updateWindowInfo 模式),避免漏掉注册前状态。
+          const initialStatus = win.getWindowStatus();
+          const nativeModule: ESObject = AppStorage.get<ESObject>(NATIVE_MODULE_STORAGE_KEY);
+          if (nativeModule && typeof nativeModule.notifyWindowStatus === 'function') {
+            nativeModule.notifyWindowStatus(windowId, initialStatus);
+          }
+        } catch (e) {
+          hilog.warn(DOMAIN, 'NativeAbility', 'windowStatusChange registration failed: %{public}s', String(e));
+        }
       } catch (e) {
         hilog.error(DOMAIN, 'NativeAbility', 'Window event registration failed: %{public}s', String(e));
       }

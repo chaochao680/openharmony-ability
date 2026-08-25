@@ -769,6 +769,52 @@ pub fn drain_pending_window_closes() -> Vec<i32> {
         .unwrap_or_default()
 }
 
+/// Global queue for pending window status changes from ArkTS.
+/// When ArkTS receives `window.on('windowStatusChange')`, it pushes the OHOS
+/// window ID + `WindowStatusType` value here. The tauri-runtime-wry event loop
+/// drains this queue and routes each (window_id, status) to the matching tao
+/// `Window` via `apply_window_status`, which updates the `visible`/`fullscreen`
+/// mirror bits to reflect system truth.
+///
+/// Mirrors the `notify_window_close` / `drain_pending_window_closes` bypass:
+/// tao's ZST `WindowId` cannot carry identity, so real OHOS window IDs are
+/// routed here. See doc/OHOS窗口遗留问题.md(问题五 5.3).
+#[cfg(target_env = "ohos")]
+static PENDING_WINDOW_STATUS: Mutex<Vec<(i32, i32)>> = Mutex::new(Vec::new());
+
+/// NAPI function called from ArkTS `windowStatusChange` callbacks to report a
+/// window status change. Queues (window_id, status) for the Rust event loop.
+///
+/// `status` is the raw OHOS `WindowStatusType` value (transparently forwarded):
+/// FULL_SCREEN=1, MAXIMIZE=2, MINIMIZE=3, FLOATING=4, SPLIT_SCREEN=5.
+/// Semantic decoding happens on the tao side (`apply_window_status`); this layer
+/// only transports the integer.
+#[napi]
+#[cfg(target_env = "ohos")]
+pub fn notify_window_status(window_id: i32, status: i32) {
+    match PENDING_WINDOW_STATUS.lock() {
+        Ok(mut queue) => queue.push((window_id, status)),
+        Err(poisoned) => {
+            log::warn!(
+                "[OHOS] PENDING_WINDOW_STATUS mutex poisoned, recovering. window_id={} status={}",
+                window_id, status
+            );
+            poisoned.into_inner().push((window_id, status));
+        }
+    }
+}
+
+/// Drain all pending window status changes.
+/// Called by tauri-runtime-wry event loop (alongside `drain_pending_window_closes`)
+/// to回灌 system window status into tao mirror bits. See doc/OHOS窗口遗留问题.md(问题五 5.3).
+#[cfg(target_env = "ohos")]
+pub fn drain_pending_window_status() -> Vec<(i32, i32)> {
+    PENDING_WINDOW_STATUS
+        .lock()
+        .map(|mut q| q.drain(..).collect())
+        .unwrap_or_default()
+}
+
 // ─── Cursor position tracking ─────────────────────────────────────────────────
 // ArkTS onMouse handler calls update_cursor_position() via NAPI.
 // tao reads these values in cursor_position().

@@ -132,6 +132,10 @@ interface WebviewNodeData extends WebviewInitData {
   controller: WebviewController;
   didInitialLoad?: boolean;
   blurModifier?: BlurModifier;
+  // True when the webview was created WITHOUT explicit style.width — it fills
+  // its parent container ("100%") and runtime set_bounds width/height is
+  // ignored for it (see updateWebviewStyle).
+  naturalLayout?: boolean;
 }
 
 @Builder
@@ -146,14 +150,15 @@ function WebBuilder(data: WebviewNodeData) {
       controller: data.controller as web_webview.WebviewController,
       renderMode: data?.transparent ? RenderMode.SYNC_RENDER : RenderMode.ASYNC_RENDER
     })
-      // Use "100%" (natural ArkUI layout) instead of data.style.width/height.
-      // set_bounds (BuilderNode.update) sizes the Web node but does NOT notify the
-      // ArkWeb render engine to relayout → after window resize (release), the page
-      // keeps the old layout and the bottom is cut off. With "100%" the Web follows
-      // the Stack/window naturally on resize → ArkUI triggers ArkWeb relayout.
-      // (set_bounds still sets data.style.x/y for .position below.)
-      .width("100%")
-      .height("100%")
+      // Child webviews are created with explicit bounds (wry is_child=true →
+      // WebViewStyle width/height); webviews without style.width — the main
+      // webview of each window — fall back to "100%" so they follow window
+      // resizes naturally. Sizing those explicitly would desync from the window
+      // (BuilderNode.update does not notify ArkWeb to relayout → after window
+      // resize the page keeps the old layout and the bottom is cut off; that
+      // regression is guarded in updateWebviewStyle by naturalLayout).
+      .width(data.style?.width ?? "100%")
+      .height(data.style?.height ?? "100%")
       .position({
         x: data.style?.x ?? 0,
         y: data.style?.y ?? 0,
@@ -287,10 +292,10 @@ function EmbeddedWebBuilder(data: WebviewNodeData) {
       controller: data.controller as web_webview.WebviewController,
       renderMode: data?.transparent ? RenderMode.SYNC_RENDER : RenderMode.ASYNC_RENDER
     })
-      // "100%" natural ArkUI layout (see WebBuilder) — set_bounds sizing via
-      // BuilderNode.update does not notify ArkWeb to relayout on resize.
-      .width("100%")
-      .height("100%")
+      // Explicit bounds when provided (child webviews); "100%" natural layout
+      // otherwise (see WebBuilder).
+      .width(data.style?.width ?? "100%")
+      .height(data.style?.height ?? "100%")
       .backgroundColor(convertRRGGBBAAtoAARRGGBB(data?.style?.backgroundColor))
       .javaScriptAccess(data?.javascriptEnable)
       .domStorageAccess(true)
@@ -382,10 +387,10 @@ function EmbeddedWebBuilder(data: WebviewNodeData) {
         handleWindowNew(event, data, 'EmbeddedWebBuilder');
       })
     }
-  // "100%" natural ArkUI layout (see WebBuilder) — keeps .position for host-slot
-  // placement; sizing via "100%" lets the Web follow resize naturally.
-  .width("100%")
-  .height("100%")
+  // Explicit bounds when provided (child webviews); "100%" natural layout
+  // otherwise (see WebBuilder). Keeps .position for host-slot placement.
+  .width(data.style?.width ?? "100%")
+  .height(data.style?.height ?? "100%")
   .position({
     x: data.style?.x ?? 0,
     y: data.style?.y ?? 0,
@@ -426,6 +431,10 @@ function ensureWebviewNodeData(data: WebviewInitData): WebviewNodeData {
   }
   const prepared = data as WebviewNodeData;
   prepared.didInitialLoad = prepared.didInitialLoad === true;
+  // Webviews created without explicit style.width follow their parent
+  // container ("100%"). Runtime set_bounds width/height is stripped for them
+  // in updateWebviewStyle so window resizes keep driving ArkWeb relayout.
+  prepared.naturalLayout = prepared.naturalLayout === true || prepared.style.width === undefined;
 
   if (prepared?.devtools) {
     setWebDebuggingAccess(true);
@@ -713,7 +722,18 @@ export class RustWebviewNodeController extends NodeController {
       return;
     }
 
-    const newEntry: WebviewNodeData = { ...entry, style: style };
+    let effectiveStyle: WebviewStyle = style;
+    if (entry.naturalLayout === true) {
+      // Natural-layout webviews (created without style.width — the main webview
+      // of each window) keep "100%" sizing: tauri-runtime-wry calls set_bounds on
+      // every window resize with the new window dims, and applying those as
+      // explicit pixels would desync the page layout from the window
+      // (BuilderNode.update does not notify ArkWeb to relayout — the 0cac4c3
+      // regression). Strip width/height so only position/colors/visibility apply.
+      effectiveStyle = { ...style, width: undefined, height: undefined };
+    }
+
+    const newEntry: WebviewNodeData = { ...entry, style: effectiveStyle };
     this.webviewEntries.set(webTag, newEntry);
     // Runtime refresh via AttributeUpdater — node.update does not refresh backdropBlur/backgroundColor,
     // so Acrylic/Mica tints (set_window_background_color) and blur radius need modifier.attribute to
@@ -849,7 +869,13 @@ export class EmbeddedWebviewManager {
       return;
     }
 
-    const newData: WebviewNodeData = { ...entry.data, style: style };
+    let effectiveStyle: WebviewStyle = style;
+    if (entry.data.naturalLayout === true) {
+      // See RustWebviewNodeController.updateWebviewStyle (naturalLayout guard).
+      effectiveStyle = { ...style, width: undefined, height: undefined };
+    }
+
+    const newData: WebviewNodeData = { ...entry.data, style: effectiveStyle };
     entry.data = newData;
     entry.content.update(newData);
   }

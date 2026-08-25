@@ -8,6 +8,7 @@ import {
 import { AcceleratorMatcher } from "../helper/accelerator_matcher";
 import { KeyCode, pointer } from "@kit.InputKit";
 import { hilog } from '@kit.PerformanceAnalysisKit';
+import { BusinessError, deviceInfo } from '@kit.BasicServicesKit';
 import { window as arkWindow, CursorController } from '@kit.ArkUI';
 import { display } from '@kit.ArkUI';
 import { WindowManager } from '../window/WindowManager';
@@ -31,7 +32,11 @@ struct FloatPage {
   @LocalStorageProp('maximizable') maximizable: boolean = true;
   @LocalStorageProp('minimizable') minimizable: boolean = true;
   @LocalStorageProp('resizable') resizable: boolean = true;
+  // Window title (set by setWindowTitle → LocalStorage 'title')
+  @LocalStorageProp('title') title: string = '';
   @StorageProp("__openharmony_ability_is_desktop__") isDesktop: boolean = false;
+  // Maximize toggle state (local UI state, not persisted)
+  @State isMaximized: boolean = false;
 
   // Window control
   private windowClass: arkWindow.Window | null = null;
@@ -103,6 +108,31 @@ struct FloatPage {
           } catch (e) {
             hilog.error(DOMAIN, 'FloatPage', 'Failed to get window rect: %{public}s', JSON.stringify(e));
           }
+          // 回灌系统窗口状态到 tao 镜像位(问题五 5.3)。
+          // Float 子窗口的 maximize/minimize/fullscreen 系统状态变化经
+          // notifyWindowStatus NAPI 入队,runtime-wry drain 路由到对应 tao Window。
+          // API 11+;不支持则静默降级。详见 doc/OHOS窗口遗留问题.md。
+          try {
+            this.windowClass.on("windowStatusChange", (statusType: arkWindow.WindowStatusType) => {
+              // G9: drive the maximize/restore button icon from the actual system status,
+              // so it stays in sync when maximize/restore is triggered by the system or by
+              // the tao mirror (apply_window_status), not only on button click.
+              this.isMaximized = (statusType === arkWindow.WindowStatusType.MAXIMIZE);
+              const nativeModule: ESObject = AppStorage.get<ESObject>(NATIVE_MODULE_STORAGE_KEY);
+              if (nativeModule && typeof nativeModule.notifyWindowStatus === 'function') {
+                nativeModule.notifyWindowStatus(this.windowId, statusType);
+              }
+            });
+            // seed 初始态(同时驱动按钮图标 + NAPI 镜像位)。
+            const initialStatus = this.windowClass.getWindowStatus();
+            this.isMaximized = (initialStatus === arkWindow.WindowStatusType.MAXIMIZE);
+            const nativeModule: ESObject = AppStorage.get<ESObject>(NATIVE_MODULE_STORAGE_KEY);
+            if (nativeModule && typeof nativeModule.notifyWindowStatus === 'function') {
+              nativeModule.notifyWindowStatus(this.windowId, initialStatus);
+            }
+          } catch (e) {
+            hilog.warn(DOMAIN, 'FloatPage', 'windowStatusChange registration failed: %{public}s', String(e));
+          }
         } else {
           hilog.error(DOMAIN, 'FloatPage', 'findWindow returned null for name: %{public}s', winName);
         }
@@ -148,11 +178,65 @@ struct FloatPage {
           //    - decorations=false on desktop: transparent drag bar only (no close button)
           if (this.windowClass && (this.decorations || this.isDesktop)) {
             Row() {
-              Row() {}
-                .layoutWeight(1)
-                .height(40);
+              // Title text (left, occupies remaining space)
+              Text(this.title)
+                .fontSize(13)
+                .fontColor('#333333')
+                .maxLines(1)
+                .textOverflow({ overflow: TextOverflow.Ellipsis })
+                .margin({ left: 12 })
+                .height(40)
+                .layoutWeight(1);
 
-              if (this.decorations && this.closable) {
+              // Minimize button — always visible when decorations=true;
+              // interception is in WindowManager.minimizeWindow (getDecorationFlag check)
+              if (this.decorations) {
+                Button() {
+                  Text('—')
+                    .fontSize(16)
+                    .fontColor('#666666');
+                }
+                .width(32)
+                .height(32)
+                .borderRadius(16)
+                .backgroundColor('#f0f0f0')
+                .margin({ top: 4, right: 4 })
+                .onClick(() => {
+                  try { WindowManager.getInstance().minimizeWindow(this.windowId); }
+                  catch (err) { hilog.warn(DOMAIN, 'FloatPage', 'minimize failed: %{public}s', JSON.stringify(err)); }
+                });
+              }
+
+              // Maximize/restore button — always visible when decorations=true;
+              // interception is in WindowManager.maximizeWindow (getDecorationFlag check)
+              if (this.decorations) {
+                Button() {
+                  Text(this.isMaximized ? '❐' : '□')
+                    .fontSize(14)
+                    .fontColor('#666666');
+                }
+                .width(32)
+                .height(32)
+                .borderRadius(16)
+                .backgroundColor('#f0f0f0')
+                .margin({ top: 4, right: 4 })
+                .onClick(() => {
+                  try {
+                    if (this.isMaximized) {
+                      WindowManager.getInstance().restoreWindow(this.windowId);
+                    } else {
+                      WindowManager.getInstance().maximizeWindow(this.windowId);
+                    }
+                    // isMaximized is driven by windowStatusChange (G9) — no optimistic
+                    // toggle here, so the icon always reflects the actual system state
+                    // once the status-change callback fires (also covers system/tao triggers).
+                  } catch (err) { hilog.warn(DOMAIN, 'FloatPage', 'maximize/restore failed: %{public}s', JSON.stringify(err)); }
+                });
+              }
+
+              // Close button — always visible when decorations=true;
+              // interception is in WindowManager.destroyWindow (getDecorationFlag check)
+              if (this.decorations) {
                 Button() {
                   Image($r('sys.media.ohos_ic_public_cancel'))
                     .width(20)
@@ -167,6 +251,12 @@ struct FloatPage {
                 .onClick(async () => {
                   hilog.info(DOMAIN, 'FloatPage', 'Close button clicked for window %{public}d', this.windowId);
                   if (this.closeNotified) {
+                    return;
+                  }
+                  // Check closable flag BEFORE anything else (问题四: 拦截 API 执行路径)
+                  // Must be before notifyWindowClose — otherwise Rust triggers close event chain.
+                  if (!WindowManager.getInstance().getDecorationFlag(this.windowId, 'closable')) {
+                    hilog.warn(DOMAIN, 'FloatPage', 'Close blocked: closable flag not set (window %{public}d)', this.windowId);
                     return;
                   }
                   this.closeNotified = true;
@@ -197,17 +287,29 @@ struct FloatPage {
             .width('100%')
             .height(40)
             .align(Alignment.TopEnd)
-            .gesture(
-              PanGesture({ direction: PanDirection.All })
-                .onActionUpdate((event: GestureEvent) => {
-                  if (this.windowClass) {
-                    this.windowPosition.x = this.windowClass.getGlobalRect().left;
-                    this.windowPosition.y = this.windowClass.getGlobalRect().top;
-                    this.windowPosition.x += event.offsetX;
-                    this.windowPosition.y += event.offsetY;
-                  }
-                })
-            );
+            // startMoving (API14+) must be called in onTouch(TouchType.Down) on the Row
+            // (not Text — Text may not capture touch events reliably).
+            // Guarded like setWindowTopmost/restoreWindow: on API<14 startMoving is undefined,
+            // so skip (drag unavailable on old API) instead of throwing on every touch-down.
+            // A PanGesture fallback is NOT attached alongside startMoving — a simultaneously
+            // bound PanGesture consumes the Down event and blocks startMoving, so the two
+            // cannot coexist; mutually-exclusive Row branching was deemed not worth the
+            // duplication given Float dragging targets API14+ desktop.
+            .onTouch((event: TouchEvent) => {
+              if (event.type === TouchType.Down) {
+                if (deviceInfo.sdkApiVersion < 14) {
+                  return;
+                }
+                try {
+                  this.windowClass?.startMoving()?.catch((err: BusinessError) => {
+                    hilog.warn(DOMAIN, 'FloatPage', 'startMoving failed: %{public}s', JSON.stringify(err));
+                  });
+                } catch (err) {
+                  hilog.warn(DOMAIN, 'FloatPage', 'startMoving exception: %{public}s', String(err));
+                }
+              }
+            });
+            // PanGesture removed — startMoving handles drag natively (no conflict).
           }
         }
         .layoutWeight(1)

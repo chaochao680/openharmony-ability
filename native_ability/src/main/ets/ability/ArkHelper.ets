@@ -2,7 +2,9 @@ import common from "@ohos.app.ability.common";
 import window from "@ohos.window";
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { statusBarManager } from "@kit.DeskTopExtensionKit";
-import { emitter, BusinessError } from "@kit.BasicServicesKit";
+import { emitter, BusinessError, deviceInfo } from "@kit.BasicServicesKit";
+import { notificationManager } from "@kit.NotificationKit";
+import { inputMethod } from "@kit.IMEKit";
 import { image } from "@kit.ImageKit";
 import {
   ArkHelper,
@@ -60,6 +62,14 @@ import { DOMAIN, NATIVE_MODULE_STORAGE_KEY } from '../helper/constants';
 export function createArkHelper(): ArkHelper {
   // Per-window EmbeddedWebviewManager instances, keyed by windowId
   const embeddedManagers: Map<number, EmbeddedWebviewManager> = new Map();
+
+  // Monotonic notification id for requestUserAttention — avoids concurrent calls sharing a
+  // fixed id and overwriting each other (PR#45 review F3). See requestUserAttention.
+  let attentionNotifId: number = 0;
+
+  // Last updateCursor result for setImePosition — the promise settles async, so the
+  // sync NAPI call can't return it; Rust polls it back via getImePositionResult.
+  let lastImeResult: ESObject = { ok: false, code: -1, message: 'not called', x: 0, y: 0, ts: 0 };
 
   const getEmbeddedManager = (windowId: number): EmbeddedWebviewManager => {
     if (!embeddedManagers.has(windowId)) {
@@ -565,6 +575,32 @@ export function createArkHelper(): ArkHelper {
       }
     },
 
+    setWindowTopmost: (windowId: number, topmost: boolean): void => {
+      try {
+        WindowManager.getInstance().setWindowTopmost(windowId, topmost);
+      } catch (err) {
+        safeLogError('setWindowTopmost', err);
+      }
+    },
+
+    setWindowTitle: (args: ESObject): void => {
+      try {
+        const windowId = Number(args.windowId);
+        const title = String(args.title);
+        WindowManager.getInstance().setWindowTitle(windowId, title);
+      } catch (err) {
+        safeLogError('setWindowTitle', err);
+      }
+    },
+
+    setWindowLimits: (windowId: number, minW: number, minH: number, maxW: number, maxH: number): void => {
+      try {
+        WindowManager.getInstance().setWindowLimits(windowId, minW, minH, maxW, maxH);
+      } catch (err) {
+        safeLogError('setWindowLimits', err);
+      }
+    },
+
     focusWindow: (windowId: number): void => {
       try {
         const wm = WindowManager.getInstance();
@@ -663,6 +699,10 @@ export function createArkHelper(): ArkHelper {
       try { WindowManager.getInstance().setPointerStyle(windowId, style); }
       catch (err) { safeLogError('setPointerStyle', err); }
     },
+    getRealWindowId: (windowId: number): number => {
+      try { return WindowManager.getInstance().getRealWindowId(windowId); }
+      catch (err) { safeLogError('getRealWindowId', err); return -1; }
+    },
 
     isMaximized: (windowId: number): boolean => {
       try { return WindowManager.getInstance().isMaximized(windowId); }
@@ -696,6 +736,108 @@ export function createArkHelper(): ArkHelper {
         wm.loadUrl(id, url);
       } catch (err) {
         hilog.error(DOMAIN, 'ArkHelper', 'loadUrl failed for window %{public}d: %{public}s', id, JSON.stringify(err));
+      }
+    },
+
+    requestUserAttention: (): void => {
+      // OHOS 窗口层无 requestAttention API。通过 notificationManager 发通知实现类似效果。
+      // 必须用静态 import 的 notificationManager — 动态 import('@kit.NotificationKit')
+      // 在设备上加载 native so 失败(libnotificationkit.z.so not exist)。
+      // 通知 id:用闭包内单调递增计数器,避免并发调用共用固定 id:1 导致后调用覆盖前者
+      // (PR#45 review F3)。tao 侧 request_user_attention 未透传 windowId,故此处无法按窗口
+      // 分配 id(那需要 tao→ability crate→ArkTS 全链路加 windowId 形参)。
+      const notifId = ++attentionNotifId;
+      try {
+        const doPublish = () => {
+          notificationManager.publish({
+            id: notifId,
+            content: {
+              contentType: notificationManager.ContentType.NOTIFICATION_CONTENT_BASIC_TEXT,
+              normal: { title: 'Tauri App', text: '请查看应用窗口' as string },
+            } as ESObject,
+          } as ESObject).then(() => {
+            hilog.info(DOMAIN, 'ArkHelper', 'requestUserAttention: notification published OK (id=%{public}d)', notifId);
+          }).catch((err: ESObject) => {
+            const code = (err && (err as ESObject).code) ? (err as ESObject).code : -1;
+            hilog.warn(DOMAIN, 'ArkHelper', 'requestUserAttention: publish failed id=%{public}d code=%{public}s: %{public}s', notifId, String(code), JSON.stringify(err));
+            // 1600004 = 通知未授权 → 弹系统授权弹窗(requestEnableNotification)
+            if (code === 1600004) {
+              notificationManager.requestEnableNotification().then(() => {
+                hilog.info(DOMAIN, 'ArkHelper', 'requestUserAttention: notification enabled, retry publish (id=%{public}d)', notifId);
+                doPublish();
+              }).catch((e2: ESObject) => {
+                hilog.warn(DOMAIN, 'ArkHelper', 'requestUserAttention: requestEnableNotification failed: %{public}s', JSON.stringify(e2));
+              });
+            }
+          });
+        };
+        doPublish();
+      } catch (err) {
+        // safeLogError: 同步 catch 处于 NAPI 重入上下文(Rust func.call),hilog.warn
+        // 可能抛 "Argc mismatch" 掩盖原始错误(C5)。
+        safeLogError('requestUserAttention', err);
+      }
+    },
+
+    setImePosition: (windowId: number, x: number, y: number): void => {
+      // IME 位置:通过 inputMethod.getController().updateCursor(CursorInfo) 通知输入法光标坐标。
+      // API 10+。tao 传的是物理像素(px),CursorInfo 的 left/top 也以 px 计,直接透传。
+      // 前置条件:窗口内有已聚焦的编辑框(HTML input 亦可,ArkWeb 走系统输入法框架,
+      // 见官方《Web 组件对接软键盘》)。无聚焦编辑框时报 12800009
+      // (input method client detached) — 任何应用无聚焦编辑框时调用皆如此,非 webview 特有。
+      // 聚焦 HTML input 后实测返回 OK(2026-08-19 A/B 实验)。
+      try {
+        const cursorInfo: ESObject = {
+          left: Math.round(x),
+          top: Math.round(y),
+          width: 1,       // 光标宽度(px)
+          height: 24,     // 光标高度(px,近似行高)
+        };
+        inputMethod.getController().updateCursor(cursorInfo).then(() => {
+          lastImeResult = { ok: true, code: 0, message: 'OK', x: Math.round(x), y: Math.round(y), ts: Date.now() };
+          hilog.info(DOMAIN, 'ArkHelper', 'setImePosition: updateCursor OK window=%{public}d x=%{public}d y=%{public}d', windowId, x, y);
+        }).catch((err: ESObject) => {
+          const code = (err && (err as ESObject).code) ? (err as ESObject).code : -1;
+          lastImeResult = { ok: false, code: code, message: JSON.stringify(err), x: Math.round(x), y: Math.round(y), ts: Date.now() };
+          // 12800009 = input method client detached — 调用时无聚焦编辑框,正常
+          hilog.warn(DOMAIN, 'ArkHelper', 'setImePosition: updateCursor failed code=%{public}s: %{public}s', String(code), JSON.stringify(err));
+        });
+      } catch (err) {
+        // Sync throw — the .then/.catch callbacks never run, so nothing would
+        // update lastImeResult; record the failure here or the readback channel
+        // would return a stale success from a previous call (review finding).
+        lastImeResult = { ok: false, code: -1, message: 'sync throw', x: Math.round(x), y: Math.round(y), ts: Date.now() };
+        // safeLogError: 同步 catch 处于 NAPI 重入上下文(C5)。
+        safeLogError('setImePosition', err);
+      }
+    },
+
+    getImePositionResult: (): string => {
+      // poll 回读:上一次 setImePosition 里 updateCursor promise 的真实结果
+      return JSON.stringify(lastImeResult);
+    },
+
+    setWindowDraggable: (windowId: number, enable: boolean): void => {
+      // enableDrag (API20+) — 允许/禁止窗口边缘拖拽缩放
+      // safeLogError: 本方法经 Rust func.call 同步调用(NAPI 重入上下文),同步段
+      // (window-not-found 分支、外层 catch)的 hilog 可能抛 "Argc mismatch"(C5);
+      // 异步 .then/.catch 回调不在重入上下文,保留 hilog。
+      // API guard: enableDrag 是 API20+,低版本 win.enableDrag 为 undefined → TypeError,
+      // 对齐同文件的 startMoving(API14)/setWindowTopmost(API14) guard 模式。
+      if (deviceInfo.sdkApiVersion < 20) {
+        safeLogError('setWindowDraggable(api-below-20)', { code: -1, msg: `enableDrag requires API20+, current ${deviceInfo.sdkApiVersion}; no-op` } as ESObject);
+        return;
+      }
+      try {
+        const win = WindowManager.getInstance().getWindow(windowId);
+        if (!win) { safeLogError('setWindowDraggable(window-not-found)', { code: -1, msg: `window ${windowId} not found` } as ESObject); return; }
+        win.enableDrag(enable).then(() => {
+          hilog.info(DOMAIN, 'ArkHelper', 'setWindowDraggable: window %{public}d enable=%{public}s OK', windowId, String(enable));
+        }).catch((err: ESObject) => {
+          hilog.warn(DOMAIN, 'ArkHelper', 'setWindowDraggable: window %{public}d failed: %{public}s', windowId, JSON.stringify(err));
+        });
+      } catch (err) {
+        safeLogError('setWindowDraggable', err);
       }
     },
 

@@ -165,6 +165,9 @@ export interface ArkHelper {
   startUIAbility: (want: UIAbilityWantParams) => void;
   setWindowDecorations: (windowId: number, decorations: boolean) => void;
   setWindowBackgroundColor: (windowId: number, color: number) => void;
+  setWindowTopmost: (windowId: number, topmost: boolean) => void;
+  setWindowTitle: (args: ESObject) => void;
+  setWindowLimits: (windowId: number, minW: number, minH: number, maxW: number, maxH: number) => void;
   focusWindow: (windowId: number) => void;
   setWindowFocusable: (windowId: number, focusable: boolean) => void;
   moveWindowTo: (windowId: number, x: number, y: number) => void;
@@ -185,7 +188,20 @@ export interface ArkHelper {
   setWindowDecorationFlags: (windowId: number, flags: number) => void;
   setPointerVisible: (visible: boolean) => void;
   setPointerStyle: (windowId: number, style: number) => void;
+  // Cursor-grab precondition query — tao window id → real OHOS window id
+  // (getWindowProperties().id); returns -1 on failure.
+  getRealWindowId: (windowId: number) => number;
   loadUrl: (id: number, url: string) => void;
+  // 用户注意力请求 — 通过 notificationManager 发通知(非任务栏闪烁)
+  requestUserAttention: () => void;
+  // IME 位置 — 通过 inputMethod 通知光标位置
+  setImePosition: (windowId: number, x: number, y: number) => void;
+  // IME 位置 — 读取上一次 updateCursor 的真实结果(poll 模式,setImePosition 的
+  // promise 异步结算,同步调用返回时结果尚未就绪)。返回 JSON 字符串:
+  // {"ok":bool,"code":number,"message":string,"x":number,"y":number,"ts":number}
+  getImePositionResult: () => string;
+  // 拖拽缩放 — enableDrag 允许/禁止窗口边缘拖拽缩放
+  setWindowDraggable: (windowId: number, enable: boolean) => void;
   createMenu?: (options: MenuCreateOptions) => Promise<string>;
   createMenuItem?: (options: MenuItemCreateOptions) => Promise<string>;
   createSubmenu?: (options: SubmenuCreateOptions) => Promise<string>;
