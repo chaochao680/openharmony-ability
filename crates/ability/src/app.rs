@@ -71,7 +71,12 @@ pub struct OpenHarmonyAppInner {
     id: i64,
     pub(crate) configuration: Configuration,
     pub(crate) rect: Rect,
-    pub(crate) window_rect: Rect,
+    /// Per-window rect cache keyed by windowId (0 = main window, >0 = Float sub-window).
+    /// Written by the `window_rect_change` lifecycle closure (lifecycle.rs) from ArkTS
+    /// windowRectChange callbacks; read by tao's inner_size/outer_position/etc via
+    /// `window_rect_for(window_id)`. See design.md D1/D4 (openspec change
+    /// p1-window-state-per-window-rect).
+    pub(crate) window_rects: HashMap<i64, Rect>,
     /// Last inner size set via set_inner_size(). Packed as (w:u32)<<32 | (h:u32).
     /// 0 = unset. Used to make inner_size()→set_inner_size() idempotent on OHOS
     /// where windowSizeChange/windowRectChange may report content area, not outer area.
@@ -135,7 +140,7 @@ impl OpenHarmonyAppInner {
             id,
             configuration: Default::default(),
             rect: Default::default(),
-            window_rect: Default::default(),
+            window_rects: HashMap::new(),
             last_set_inner_size: 0,
             avoid_areas: HashMap::new(),
             init_context: AbilityInitContext::default(),
@@ -230,7 +235,12 @@ impl OpenHarmonyAppInner {
         self.raw_window = None;
         self.xcomponent = None;
         self.rect = Rect::default();
-        self.window_rect = Rect::default();
+        // Clear only the main-window (key 0) rect: release_render_owner tears down the
+        // main window's DefaultXComponent render surface. Sub-window rects (key >0) are
+        // owned by their own Float sub-window lifetimes and cleared via separate paths.
+        // NOTE: deactivate_surface intentionally does NOT reset window_rects — that
+        // preserves the asymmetric semantics (only full release clears the rect cache).
+        self.window_rects.remove(&0);
         self.avoid_areas.clear();
         Some(surface_was_active)
     }
@@ -239,8 +249,20 @@ impl OpenHarmonyAppInner {
         self.rect
     }
 
-    pub fn window_rect(&self) -> Rect {
-        self.window_rect
+    /// Per-window rect lookup. Returns Rect::default() for an unregistered window id
+    /// (e.g. before the first windowRectChange callback fires) — same fallback semantics
+    /// as the old single-field window_rect (design.md D4).
+    pub fn window_rect_for(&self, window_id: i64) -> Rect {
+        self.window_rects
+            .get(&window_id)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    /// Per-window rect setter. Called by the `window_rect_change` lifecycle closure
+    /// (lifecycle.rs) with the windowId parsed from the ArkTS-wrapped options.
+    pub fn set_window_rect(&mut self, window_id: i64, rect: Rect) {
+        self.window_rects.insert(window_id, rect);
     }
 
     /// Packed last-set inner size: (width:u32)<<32 | (height:u32). 0 = unset.
@@ -270,7 +292,7 @@ impl OpenHarmonyAppInner {
 
     /// Physical dimensions of the default display, in pixels.
     ///
-    /// This is the real screen size — as opposed to `content_rect()`/`window_rect()`,
+    /// This is the real screen size — as opposed to `content_rect()`/`window_rect_for()`,
     /// which return the *window's own* rect. Consumers that need the screen size
     /// (e.g. the windowing backend's `MonitorHandle::size()` for window centering) must use this,
     /// otherwise computations like positioner `Center` collapse to ~(0,0) because
@@ -671,8 +693,17 @@ impl OpenHarmonyApp {
         self.inner.read().unwrap().content_rect()
     }
 
-    pub fn window_rect(&self) -> Rect {
-        self.inner.read().unwrap().window_rect()
+    /// Per-window rect lookup (key = windowId; 0 = main window). See
+    /// OpenHarmonyAppInner::window_rect_for. Used by tao's inner_size/outer_position/etc
+    /// so each window reads its own rect instead of sharing a single field.
+    pub fn window_rect_for(&self, window_id: i64) -> Rect {
+        self.inner.read().unwrap().window_rect_for(window_id)
+    }
+
+    /// Per-window rect setter. Called from the lifecycle closure with the windowId
+    /// parsed from the ArkTS-wrapped windowRectChange options.
+    pub fn set_window_rect(&self, window_id: i64, rect: Rect) {
+        self.inner.write().unwrap().set_window_rect(window_id, rect);
     }
 
     /// Packed last-set inner size: (width:u32)<<32 | (height:u32). 0 = unset.
@@ -989,18 +1020,25 @@ mod tests {
     fn releasing_a_component_clears_its_window_scoped_cache() {
         let mut inner = OpenHarmonyAppInner::new();
         inner.claim_render_owner("owner").unwrap();
-        inner.window_rect = Rect {
-            top: 1,
-            left: 2,
-            width: 3,
-            height: 4,
-        };
+        // Per-window rect cache is keyed by windowId; 0 = main window. The main window's
+        // surface is torn down by release_render_owner, so key 0 must be cleared by it.
+        inner.window_rects.insert(
+            0,
+            Rect {
+                top: 1,
+                left: 2,
+                width: 3,
+                height: 4,
+            },
+        );
         inner
             .avoid_areas
             .insert(AvoidAreaType::Keyboard, AvoidArea::default());
 
         assert_eq!(inner.release_render_owner("owner"), Some(false));
-        assert_eq!(inner.window_rect, Rect::default());
+        // release_render_owner clears key 0 (main window); sub-window rects would persist
+        // until their own destruction path runs. Assert key 0 is gone.
+        assert!(inner.window_rects.get(&0).is_none());
         assert!(inner.avoid_areas.is_empty());
     }
 }

@@ -573,7 +573,12 @@ class BridgeHost {
         return;
       }
       try {
-        this.applicationLifecycle?.windowStageEventCallback.onWindowSizeChange(size);
+        // Phase 2 (design.md D2): wrap windowId=0 — this registration is the main-window
+        // component window's second windowSizeChange registration (the first is in
+        // NativeAbility.ets), so it is always the main window (windowId 0). Phase 3 will
+        // route WindowResize by this id.
+        const wrapped: ESObject = { windowId: 0, width: size.width, height: size.height };
+        this.applicationLifecycle?.windowStageEventCallback.onWindowSizeChange(wrapped);
       } catch {}
     };
     const onRectChange = (options: window.RectChangeOptions): void => {
@@ -581,7 +586,11 @@ class BridgeHost {
         return;
       }
       try {
-        this.applicationLifecycle?.windowStageEventCallback.onWindowRectChange(options);
+        // Phase 2 (design.md D2/D3): wrap windowId=0 (this path is always the main-window
+        // component window). The Rust window_rect_change closure routes the rect into
+        // key 0 of the per-window HashMap.
+        const wrapped: ESObject = { windowId: 0, reason: options.reason, rect: options.rect };
+        this.applicationLifecycle?.windowStageEventCallback.onWindowRectChange(wrapped);
       } catch {}
     };
     const onAvoidAreaChange = (options: window.AvoidAreaOptions): void => {

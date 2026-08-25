@@ -17,6 +17,10 @@ import web_webview from '@ohos.web.webview';
 interface WindowEntry {
   window: window.Window;
   storage?: LocalStorage;
+  // Phase 2 (design.md D3): per-window windowRectChange handler reference, stored so
+  // destroyWindow/removeWindow can call win.off("windowRectChange", handler) to avoid
+  // leaking the listener past window destruction.
+  rectChangeHandler?: (options: window.RectChangeOptions) => void;
 }
 
 // Encapsulates all parameters for sub-window creation, replacing a 10-arg signature.
@@ -111,6 +115,14 @@ export class WindowManager {
   // applyWindowBlur is called AFTER a WebviewPlugin webview already exists, this fires
   // so the live Web component's backdropBlur is refreshed via node.update().
   private blurRefreshCallbacks: Map<number, (radius: number) => void> = new Map();
+
+  // Phase 2 (design.md D3 注入小节): single rect-change callback that createSubWindow's
+  // per-window windowRectChange handler invokes. WindowManager doesn't hold a lifecycle
+  // reference, so NativeAbility.onWindowStageCreate registers a callback here that fans
+  // out to every lifecycle.windowStageEventCallback.onWindowRectChange(wrapped). The
+  // wrapped options carry the windowId (main window = 0, sub-window = the createSubWindow
+  // windowId parameter).
+  private rectChangeCallback?: (options: ESObject) => void;
 
   private constructor(context: common.UIAbilityContext) {
     this.context = context;
@@ -973,6 +985,37 @@ export class WindowManager {
     storage.setOrCreate('title', '');
     this.windows.set(windowId, { window: win, storage });
 
+    // Phase 2 (design.md D3): register this sub-window's windowRectChange handler.
+    // This is the only clean registration point for Float sub-windows — createSubWindow
+    // holds both `win` and `windowId`. The handler wraps { windowId, reason, rect } and
+    // invokes the single rectChangeCallback (registered by NativeAbility.onWindowStageCreate
+    // to fan out to lifecycles), so the Rust window_rect_change closure routes the rect
+    // into the per-window HashMap at key windowId (design.md D2/D4). Registered BEFORE
+    // loadContentByName so early rect changes (resize to target size) are captured.
+    // The handler reference is stored in the WindowEntry so destroyWindow/removeWindow
+    // can win.off("windowRectChange", handler) to avoid leaking the listener.
+    let rectChangeHandler: ((options: window.RectChangeOptions) => void) | undefined =
+      (options: window.RectChangeOptions): void => {
+        try {
+          const wrapped: ESObject = { windowId, reason: options.reason, rect: options.rect };
+          this.rectChangeCallback?.(wrapped);
+        } catch (e) {
+          hilog.warn(DOMAIN, 'WindowManager', `Sub-window rectChange handler failed for %{public}d: %{public}s`, windowId, String(e));
+        }
+      };
+    try {
+      win.on("windowRectChange", rectChangeHandler);
+    } catch (e) {
+      hilog.warn(DOMAIN, 'WindowManager', `Failed to register windowRectChange for sub-window %{public}d: %{public}s`, windowId, String(e));
+      rectChangeHandler = undefined;
+    }
+    if (rectChangeHandler) {
+      let entry = this.windows.get(windowId);
+      if (entry) {
+        entry.rectChangeHandler = rectChangeHandler;
+      }
+    }
+
     // Register focus tracking for sub-window
     this.registerFocusTracking(win, windowId);
 
@@ -1307,6 +1350,18 @@ export class WindowManager {
     this.blurRefreshCallbacks.delete(Number(windowId));
   }
 
+  /** Phase 2 (design.md D3 注入小节): register the single rect-change fan-out callback.
+   *  Called by NativeAbility.onWindowStageCreate; createSubWindow's per-window
+   *  windowRectChange handler wraps { windowId, reason, rect } and invokes it, which
+   *  forwards to every lifecycle.windowStageEventCallback.onWindowRectChange. */
+  registerRectChangeCallback(cb: (options: ESObject) => void): void {
+    this.rectChangeCallback = cb;
+  }
+
+  unregisterRectChangeCallback(): void {
+    this.rectChangeCallback = undefined;
+  }
+
   /** Get the current blur radius for a window (set by applyWindowBlur). Used by WebviewPlugin
    *  BuildWebview to apply the blur at webview creation time. Returns 0 if no blur was set. */
   getPendingBlur(windowId: number): number {
@@ -1442,6 +1497,17 @@ export class WindowManager {
   // Remove window: clean up all Maps to prevent memory leaks
   removeWindow(windowId: number): void {
     hilog.info(DOMAIN, 'WindowManager', `Removing window %{public}d from all maps`, windowId);
+    // Phase 2 (design.md D3): detach this window's windowRectChange listener before
+    // dropping the Window reference so the native side stops delivering rect changes
+    // for a window that no longer exists (prevents post-destroy callbacks / leaks).
+    const entry = this.windows.get(windowId);
+    if (entry?.rectChangeHandler) {
+      try {
+        entry.window.off("windowRectChange", entry.rectChangeHandler);
+      } catch (e) {
+        hilog.warn(DOMAIN, 'WindowManager', `off windowRectChange failed for %{public}d: %{public}s`, windowId, String(e));
+      }
+    }
     // Clear user interaction tracking if this window was the last interacted one
     if (this.lastUserInteractedWindowId === windowId) {
       this.lastUserInteractedWindowId = -1;

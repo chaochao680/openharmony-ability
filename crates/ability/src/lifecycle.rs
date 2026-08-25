@@ -165,32 +165,53 @@ pub fn create_lifecycle_handle<'a>(
             Ok(())
         })?;
 
-    // TODO: we may can remove it
+    // Phase 3 (design.md D6 / task 3.5): ArkTS wraps onWindowSizeChange options as
+    // { windowId, width, height }. We read windowId here so tao's run_loop can route
+    // WindowResize to the originating window instead of always the main window.
+    // windowId is read with a fallback to 0 (main window): a registration path that
+    // does not yet wrap the options degrades to the old main-window behavior rather
+    // than failing the callback (same tolerance as window_rect_change above).
     let window_resize_app = app.clone();
     let window_resize = env.create_function_from_closure("window_resize", move |ctx| {
         let size = ctx.first_arg::<Object>()?;
         let width = size.get_named_property::<i32>("width")?;
         let height = size.get_named_property::<i32>("height")?;
+        let window_id = size.get_named_property::<i64>("windowId").unwrap_or(0);
 
         if let Some(ref mut h) = *window_resize_app.event_loop.borrow_mut() {
-            h(Event::WindowResize(Size { width, height }))
+            h(Event::WindowResize {
+                window_id,
+                size: Size { width, height },
+            })
         }
         Ok(())
     })?;
 
     // TODO: we may can remove it
+    // Phase 2 (design.md D2/D4): the ArkTS side wraps windowRectChange options as
+    // { windowId, reason, rect }. We read windowId here and route the rect into the
+    // per-window HashMap (set_window_rect) instead of the old shared single field.
+    // windowId is read with a fallback to 0 (main window): some registration points may
+    // not yet wrap the options (e.g. a path added later) — degrading to the old main-
+    // window behavior is preferable to erroring out the whole callback.
     let window_rect_app = app.clone();
     let window_rect_change =
         env.create_function_from_closure("window_rect_change", move |ctx| {
             let options = ctx.first_arg::<Object>()?;
             let reason = options.get_named_property::<i32>("reason")?;
             let rect = parse_rect(options.get_named_property::<Object>("rect")?)?;
-            window_rect_app.inner.write().unwrap().window_rect = rect;
+            // windowId is optional-with-fallback: missing or wrong type degrades to 0
+            // (main window) rather than failing the callback.
+            let window_id = options
+                .get_named_property::<i64>("windowId")
+                .unwrap_or(0);
+            window_rect_app.set_window_rect(window_id, rect);
 
             if let Some(ref mut h) = *window_rect_app.event_loop.borrow_mut() {
                 h(Event::ContentRectChange(ContentRect {
                     reason: reason.into(),
                     rect,
+                    window_id,
                 }))
             }
             Ok(())

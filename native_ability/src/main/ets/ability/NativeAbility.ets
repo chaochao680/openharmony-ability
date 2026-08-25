@@ -361,6 +361,17 @@ export class NativeAbility extends UIAbility {
     WindowManager.getInstance().registerUIAbilityStage(0, windowStage, this.context, false);
     hilog.info(DOMAIN, 'NativeAbility', 'onWindowStageCreate: windowId=0 transparent=false');
 
+    // Phase 2 (design.md D3 注入小节): WindowManager doesn't hold a lifecycle reference,
+    // so it exposes a single rectChangeCallback that createSubWindow's per-window
+    // windowRectChange handler invokes. Here we wire it to fan out to every lifecycle
+    // (same forEachLifecycle pattern as the main-window registrations above). The
+    // wrapped options already carry the windowId.
+    WindowManager.getInstance().registerRectChangeCallback((wrapped: ESObject) => {
+      this.forEachLifecycle((lifecycle) =>
+        lifecycle.windowStageEventCallback.onWindowRectChange(wrapped),
+      );
+    });
+
     // Inject the WindowStage into the bridge session so plugins requiring a
     // window-stage context (e.g. window/webview) can install before the page renders.
     if (this.bridgeSessionId) {
@@ -404,8 +415,12 @@ export class NativeAbility extends UIAbility {
     if (win) {
       try {
         win.on("windowSizeChange", (size: window.Size) => {
+          // Phase 2 (design.md D2): wrap the bare Size with the windowId so the Rust
+          // window_resize closure can read it. windowId=0 because this is the main
+          // window (getMainWindow). Phase 3 will route WindowResize by this id.
+          const wrapped = { windowId: 0, width: size.width, height: size.height };
           this.forEachLifecycle((lifecycle) =>
-            lifecycle.windowStageEventCallback.onWindowSizeChange(size),
+            lifecycle.windowStageEventCallback.onWindowSizeChange(wrapped),
           );
         });
         win.on("windowRectChange", (options: window.RectChangeOptions) => {
@@ -413,8 +428,12 @@ export class NativeAbility extends UIAbility {
             const cb = getMenuDataCallback("main");
             cb?.onMenubarVisible?.(true);
           }
+          // Phase 2 (design.md D2): wrap windowId=0 (main window) into the options so
+          // the Rust window_rect_change closure routes the rect to key 0 in the
+          // per-window HashMap (design.md D4).
+          const wrapped = { windowId: 0, reason: options.reason, rect: options.rect };
           this.forEachLifecycle((lifecycle) =>
-            lifecycle.windowStageEventCallback.onWindowRectChange(options),
+            lifecycle.windowStageEventCallback.onWindowRectChange(wrapped),
           );
         });
         win.on("avoidAreaChange", (options: window.AvoidAreaOptions) => {

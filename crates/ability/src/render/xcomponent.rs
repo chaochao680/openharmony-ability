@@ -136,10 +136,16 @@ pub fn render(
             },
         ) {
             if let Some(ref mut h) = *on_surface_changed_app.event_loop.borrow_mut() {
-                h(Event::WindowResize(Size {
-                    width: size.width as _,
-                    height: size.height as _,
-                }))
+                // Phase 3 (design.md D6 / task 3.5): XComponent is the main window's
+                // surface, so window_id is always 0. Carrying it explicitly lets tao's
+                // run_loop route WindowResize uniformly (instead of a special-cased ZST).
+                h(Event::WindowResize {
+                    window_id: 0,
+                    size: Size {
+                        width: size.width as _,
+                        height: size.height as _,
+                    },
+                })
             }
         }
         Ok(())
