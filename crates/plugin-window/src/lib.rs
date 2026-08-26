@@ -263,6 +263,26 @@ impl_bridge_napi_type!(WindowDraggableRequest, "ohos.window.DraggableRequest");
 
 #[napi(object)]
 #[derive(Clone, Debug)]
+pub struct CursorIconRequest {
+    pub window_id: i64,
+    /// PointerStyle id as understood by WindowManager.setPointerStyle.
+    pub style: i32,
+}
+
+impl_bridge_napi_type!(CursorIconRequest, "ohos.window.CursorIconRequest");
+
+#[napi(object)]
+#[derive(Clone, Debug)]
+pub struct DecorationFlagsRequest {
+    pub window_id: i64,
+    /// FLAG bit-field (closable=1, maximizable=2, minimizable=4, resizable=8).
+    pub flags: i32,
+}
+
+impl_bridge_napi_type!(DecorationFlagsRequest, "ohos.window.DecorationFlagsRequest");
+
+#[napi(object)]
+#[derive(Clone, Debug)]
 pub struct RealWindowIdResponse {
     pub window_id: i64,
 }
@@ -632,6 +652,31 @@ impl WindowClient {
         self.call::<WindowDraggableRequest, WindowAcknowledgement>(
             "set-draggable",
             WindowDraggableRequest { window_id, enable },
+        )
+        .await?
+        .ensure()
+    }
+
+    /// Sets the pointer cursor style for one window (PointerStyle id, resolved
+    /// by the caller from `window::CursorIcon`; ArkTS validates the range).
+    pub async fn set_cursor_icon(&self, window_id: i64, style: i32) -> Result<()> {
+        validate_window_id(window_id)?;
+        self.call::<CursorIconRequest, WindowAcknowledgement>(
+            "set-cursor-icon",
+            CursorIconRequest { window_id, style },
+        )
+        .await?
+        .ensure()
+    }
+
+    /// Applies the decoration flag bit-field (closable=1, maximizable=2,
+    /// minimizable=4, resizable=8) that gates the matching window operations
+    /// on the ArkTS side.
+    pub async fn set_window_decoration_flags(&self, window_id: i64, flags: i32) -> Result<()> {
+        validate_window_id(window_id)?;
+        self.call::<DecorationFlagsRequest, WindowAcknowledgement>(
+            "set-decoration-flags",
+            DecorationFlagsRequest { window_id, flags },
         )
         .await?
         .ensure()

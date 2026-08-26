@@ -36,6 +36,8 @@ const TITLE_REQUEST_TYPE = "ohos.window.TitleRequest";
 const LIMITS_REQUEST_TYPE = "ohos.window.LimitsRequest";
 const IME_POSITION_REQUEST_TYPE = "ohos.window.ImePositionRequest";
 const DRAGGABLE_REQUEST_TYPE = "ohos.window.DraggableRequest";
+const CURSOR_ICON_REQUEST_TYPE = "ohos.window.CursorIconRequest";
+const DECORATION_FLAGS_REQUEST_TYPE = "ohos.window.DecorationFlagsRequest";
 const ACKNOWLEDGEMENT_TYPE = "ohos.window.Acknowledgement";
 const STATE_RESPONSE_TYPE = "ohos.window.StateResponse";
 const IME_POSITION_RESPONSE_TYPE = "ohos.window.ImePositionResponse";
@@ -143,6 +145,16 @@ interface ImePositionRequest {
 interface WindowDraggableRequest {
   windowId: number;
   enable: boolean;
+}
+
+interface CursorIconRequest {
+  windowId: number;
+  style: number;
+}
+
+interface DecorationFlagsRequest {
+  windowId: number;
+  flags: number;
 }
 
 class AvoidAreaRectResponse {
@@ -450,6 +462,29 @@ function parseDraggableRequest(payload: BridgeTypedValue): WindowDraggableReques
   const request = payload.value as WindowDraggableRequest;
   if (!isWindowId(request?.windowId) || typeof request.enable !== "boolean") {
     throw new Error("set-draggable requires a valid windowId and boolean enable");
+  }
+  return request;
+}
+
+function parseCursorIconRequest(payload: BridgeTypedValue): CursorIconRequest {
+  if (payload.typeName !== CURSOR_ICON_REQUEST_TYPE || typeof payload.value !== "object") {
+    throw new Error(`ohos.window.set-cursor-icon requires bridge type ${CURSOR_ICON_REQUEST_TYPE}`);
+  }
+  const request = payload.value as CursorIconRequest;
+  if (!isWindowId(request?.windowId) || !isSafeInteger(request?.style)) {
+    throw new Error("set-cursor-icon requires a valid windowId and integer style");
+  }
+  return request;
+}
+
+function parseDecorationFlagsRequest(payload: BridgeTypedValue): DecorationFlagsRequest {
+  if (payload.typeName !== DECORATION_FLAGS_REQUEST_TYPE || typeof payload.value !== "object") {
+    throw new Error(`ohos.window.set-decoration-flags requires bridge type ${DECORATION_FLAGS_REQUEST_TYPE}`);
+  }
+  const request = payload.value as DecorationFlagsRequest;
+  // FLAG bit-field: closable=1, maximizable=2, minimizable=4, resizable=8 (max 15).
+  if (!isWindowId(request?.windowId) || !isSafeInteger(request?.flags) || request.flags < 0 || request.flags > 15) {
+    throw new Error("set-decoration-flags requires a valid windowId and flags in [0, 15]");
   }
   return request;
 }
@@ -776,6 +811,27 @@ export class WindowPlugin extends AsyncPluginBase {
         throw new Error(`get-real-window-id: window ${request.windowId} not found`);
       }
       return { typeName: REAL_WINDOW_ID_RESPONSE_TYPE, value: new RealWindowIdResponse(realId) };
+    }
+
+    if (action === "set-cursor-icon") {
+      // Delegates to WindowManager.setPointerStyle, which resolves the real OHOS
+      // window id internally (pointer.setPointerStyleSync). Fire-and-forget on
+      // the ArkTS side: per-window failures are logged there, the ack only
+      // confirms the request was dispatched (tao's set_cursor_icon is a void
+      // setter).
+      const request = parseCursorIconRequest(payload);
+      WindowManager.getInstance().setPointerStyle(request.windowId, request.style);
+      return { typeName: ACKNOWLEDGEMENT_TYPE, value: new WindowAcknowledgement(true) };
+    }
+
+    if (action === "set-decoration-flags") {
+      // Applies the decoration flag bit-field (closable/maximizable/minimizable/
+      // resizable) to a Float sub-window's LocalStorage. The UIAbility main
+      // window is a no-op (its decorations are system-managed) — WindowManager
+      // logs and returns, still acknowledged.
+      const request = parseDecorationFlagsRequest(payload);
+      WindowManager.getInstance().setDecorationFlags(request.windowId, request.flags);
+      return { typeName: ACKNOWLEDGEMENT_TYPE, value: new WindowAcknowledgement(true) };
     }
 
     throw new Error(`Unsupported ohos.window action '${action}'`);
