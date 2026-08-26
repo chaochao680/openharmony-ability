@@ -1630,4 +1630,50 @@ mod tests {
             &[BridgeContextRequirement::UiContext]
         );
     }
+
+    // ── expect_engine_phase ───────────────────────────────────────────────
+
+    #[test]
+    fn expect_engine_phase_matches() {
+        let event = WebviewEngineLifecycleEvent {
+            phase: "before-init".to_string(),
+            schemes: vec![],
+        };
+        assert!(expect_engine_phase(&event, "before-init").is_ok());
+    }
+
+    #[test]
+    fn expect_engine_phase_mismatch_returns_error() {
+        let event = WebviewEngineLifecycleEvent {
+            phase: "initialized".to_string(),
+            schemes: vec![],
+        };
+        assert!(expect_engine_phase(&event, "before-init").is_err());
+    }
+
+    // ── engine_scheme_pairs ──────────────────────────────────────────────
+
+    #[test]
+    fn engine_scheme_pairs_extracts_scheme_and_options() {
+        let event = WebviewEngineLifecycleEvent {
+            phase: "before-init".to_string(),
+            schemes: vec![
+                WebviewSchemeDeclaration { scheme: "tauri".to_string(), options: 1 },
+                WebviewSchemeDeclaration { scheme: "myapp".to_string(), options: 2 },
+            ],
+        };
+        let pairs = engine_scheme_pairs(&event);
+        assert_eq!(pairs.len(), 2);
+        assert_eq!(pairs[0], ("tauri".to_string(), 1u32));
+        assert_eq!(pairs[1], ("myapp".to_string(), 2u32));
+    }
+
+    #[test]
+    fn engine_scheme_pairs_empty_schemes() {
+        let event = WebviewEngineLifecycleEvent {
+            phase: "before-init".to_string(),
+            schemes: vec![],
+        };
+        assert!(engine_scheme_pairs(&event).is_empty());
+    }
 }

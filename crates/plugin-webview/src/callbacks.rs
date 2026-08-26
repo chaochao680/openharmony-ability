@@ -583,4 +583,202 @@ mod tests {
 
         controller::on_removed("close-window-test", "native-cw").unwrap();
     }
+
+    // ─── S7 纯变换批：options 派生 + 三个 decision 函数的全分支 ─────────────────
+
+    #[test]
+    fn options_and_is_empty_derive_from_callback_presence() {
+        use super::WebviewCallbacks;
+
+        let empty = WebviewCallbacks::default();
+        assert!(empty.is_empty());
+        let empty_opts = empty.options();
+        assert!(!empty_opts.navigation_intercept);
+        assert!(!empty_opts.download_start);
+        assert!(!empty_opts.drag_drop);
+        assert!(!empty_opts.new_window);
+        assert!(!empty_opts.page_begin);
+        assert!(!empty_opts.page_end);
+
+        let mut full = WebviewCallbacks::default();
+        full.navigation = Some(Arc::new(|_| true));
+        full.download_start = Some(Arc::new(|_| {
+            crate::WebviewDownloadStartResponse::allow(None)
+        }));
+        full.drag_enter = Some(Arc::new(|_| ()));
+        full.new_window = Some(Arc::new(|_| false));
+        full.page_begin = Some(Arc::new(|_| ()));
+        full.page_end = Some(Arc::new(|_| ()));
+        full.title_change = Some(Arc::new(|_| ()));
+        full.download_end = Some(Arc::new(|_| ()));
+        full.close_window = Some(Arc::new(|| ()));
+        full.https_intercept = Some(Arc::new(|_| {
+            crate::WebviewHttpsInterceptResponse::passthrough()
+        }));
+        assert!(!full.is_empty());
+        let opts = full.options();
+        assert!(opts.navigation_intercept);
+        assert!(opts.download_start);
+        assert!(opts.drag_drop);
+        assert!(opts.new_window);
+        assert!(opts.page_begin);
+        assert!(opts.page_end);
+    }
+
+    #[test]
+    fn https_intercept_decision_stale_current_and_callback_paths() {
+        use super::{https_intercept_decision, WebviewCallbacksBuilder};
+        use crate::{controller, WebviewHttpsInterceptRequest};
+
+        WebviewCallbacksBuilder::new("https-decision-test")
+            .on_navigation_request(|_| false)
+            .build()
+            .unwrap();
+        controller::on_attached("https-decision-test", "native-h1").unwrap();
+
+        // stale controller → passthrough，callback 不被触达
+        let stale = https_intercept_decision(WebviewHttpsInterceptRequest {
+            id: "https-decision-test".to_owned(),
+            native_tag: "native-old".to_owned(),
+            url: "https://stale.example".to_owned(),
+        })
+        .unwrap();
+        assert!(!stale.handled);
+
+        // current controller 但未注册 https_intercept callback → passthrough
+        let no_callback = https_intercept_decision(WebviewHttpsInterceptRequest {
+            id: "https-decision-test".to_owned(),
+            native_tag: "native-h1".to_owned(),
+            url: "https://current.example".to_owned(),
+        })
+        .unwrap();
+        assert!(!no_callback.handled);
+
+        controller::on_removed("https-decision-test", "native-h1").unwrap();
+    }
+
+    #[test]
+    fn https_intercept_decision_callback_can_handle() {
+        use super::{https_intercept_decision, WebviewCallbacksBuilder};
+        use crate::{controller, WebviewHttpsInterceptRequest, WebviewHttpsInterceptResponse};
+
+        WebviewCallbacksBuilder::new("https-handle-test")
+            .on_https_intercept_request(|_req| WebviewHttpsInterceptResponse {
+                handled: true,
+                status: 200,
+                mime_type: "text/html".to_owned(),
+                body: b"<html>".to_vec(),
+            })
+            .build()
+            .unwrap();
+        controller::on_attached("https-handle-test", "native-h2").unwrap();
+
+        let handled = https_intercept_decision(WebviewHttpsInterceptRequest {
+            id: "https-handle-test".to_owned(),
+            native_tag: "native-h2".to_owned(),
+            url: "https://handled.example".to_owned(),
+        })
+        .unwrap();
+        assert!(handled.handled);
+        assert_eq!(handled.status, 200);
+        assert_eq!(handled.mime_type, "text/html");
+
+        controller::on_removed("https-handle-test", "native-h2").unwrap();
+    }
+
+    #[test]
+    fn download_start_decision_stale_no_callback_and_allow() {
+        use super::{download_start_decision, WebviewCallbacksBuilder};
+        use crate::{controller, WebviewDownloadStartRequest, WebviewDownloadStartResponse};
+
+        // 仅注册 navigation（builder 拒绝空声明）→ download_start 无 callback
+        WebviewCallbacksBuilder::new("dl-decision-test")
+            .on_navigation_request(|_| false)
+            .build()
+            .unwrap();
+        controller::on_attached("dl-decision-test", "native-d1").unwrap();
+
+        // stale → cancel
+        let stale = download_start_decision(WebviewDownloadStartRequest {
+            id: "dl-decision-test".to_owned(),
+            native_tag: "native-old".to_owned(),
+            url: "https://stale.example".to_owned(),
+            temp_path: None,
+        })
+        .unwrap();
+        assert!(!stale.allow);
+
+        // current 但无 download_start callback → cancel
+        let no_cb = download_start_decision(WebviewDownloadStartRequest {
+            id: "dl-decision-test".to_owned(),
+            native_tag: "native-d1".to_owned(),
+            url: "https://current.example".to_owned(),
+            temp_path: None,
+        })
+        .unwrap();
+        assert!(!no_cb.allow);
+
+        controller::on_removed("dl-decision-test", "native-d1").unwrap();
+
+        // 注册 callback → allow 透传
+        WebviewCallbacksBuilder::new("dl-allow-test")
+            .on_download_start(|_| {
+                WebviewDownloadStartResponse::allow(Some("/tmp/dl.bin".to_owned()))
+            })
+            .build()
+            .unwrap();
+        controller::on_attached("dl-allow-test", "native-d2").unwrap();
+        let allowed = download_start_decision(WebviewDownloadStartRequest {
+            id: "dl-allow-test".to_owned(),
+            native_tag: "native-d2".to_owned(),
+            url: "https://dl.example/file".to_owned(),
+            temp_path: None,
+        })
+        .unwrap();
+        assert!(allowed.allow);
+        assert_eq!(allowed.temp_path.as_deref(), Some("/tmp/dl.bin"));
+        controller::on_removed("dl-allow-test", "native-d2").unwrap();
+    }
+
+    #[test]
+    fn new_window_decision_stale_no_callback_and_allow() {
+        use super::{new_window_decision, WebviewCallbacksBuilder};
+        use crate::{controller, WebviewNewWindowRequest};
+
+        WebviewCallbacksBuilder::new("nw-decision-test")
+            .on_navigation_request(|_| false)
+            .build()
+            .unwrap();
+        controller::on_attached("nw-decision-test", "native-n1").unwrap();
+
+        let mk = |tag: &str| WebviewNewWindowRequest {
+            id: "nw-decision-test".to_owned(),
+            native_tag: tag.to_owned(),
+            target_url: "https://popup.example".to_owned(),
+            is_alert: false,
+            is_user_trigger: true,
+        };
+
+        // stale → 拒绝
+        assert!(!new_window_decision(mk("native-old")).unwrap().allow);
+        // current 但无 new_window callback → 拒绝
+        assert!(!new_window_decision(mk("native-n1")).unwrap().allow);
+        controller::on_removed("nw-decision-test", "native-n1").unwrap();
+
+        // 注册 callback → 放行
+        WebviewCallbacksBuilder::new("nw-allow-test")
+            .on_new_window_request(|_| true)
+            .build()
+            .unwrap();
+        controller::on_attached("nw-allow-test", "native-n2").unwrap();
+        let req = WebviewNewWindowRequest {
+            id: "nw-allow-test".to_owned(),
+            native_tag: "native-n2".to_owned(),
+            target_url: "https://popup.example".to_owned(),
+            is_alert: false,
+            is_user_trigger: true,
+        };
+        assert!(new_window_decision(req).unwrap().allow);
+        controller::on_removed("nw-allow-test", "native-n2").unwrap();
+    }
 }

@@ -291,6 +291,17 @@ impl WindowClient {
     }
 
     /// Creates and fully configures an OS sub-window before returning its platform window id.
+    ///
+    /// NOTE: no production callers — window creation goes through the core path
+    /// (`openharmony_ability::window::create_os_window`, NEXT_WINDOW_ID + TSFN →
+    /// WindowManager.createSubWindow), which tao's `Window::new` invokes. This
+    /// bridge-path variant returns an OHOS-assigned id disconnected from the
+    /// NEXT_WINDOW_ID registry (no tao Window, no per-window rect registration,
+    /// not tracked by window-state). See openspec change
+    /// p1-window-state-per-window-rect design.md Non-Goals, and
+    /// docs/decoupling-plan-v2.md N12 — if that migration ever routes window
+    /// creation through this client, id-registry alignment + rect registration
+    /// must be designed as part of it.
     pub async fn create_os_window(&self, request: WindowCreateRequest) -> Result<i64> {
         request.validate()?;
         let window_id = self
