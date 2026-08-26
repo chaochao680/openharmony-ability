@@ -77,6 +77,28 @@ pub struct OpenHarmonyAppInner {
     /// `window_rect_for(window_id)`. See design.md D1/D4 (openspec change
     /// p1-window-state-per-window-rect).
     pub(crate) window_rects: HashMap<i64, Rect>,
+    /// Cached main-window decoration (title bar) height, physical px, ≥0.
+    /// Latched ONLY on surface events (`latch_decor_height`) where the
+    /// XComponent rect is fresh and the WM rect has already been delivered.
+    /// Consumers (tao inner_size/set_inner_size/inner_position) must use
+    /// `decor_height()` instead of live-diffing window_rect − content_rect:
+    /// the WM rect (windowRectChange) and the surface rect (XComponent
+    /// onSurfaceChanged) update ASYNCHRONOUSLY — a read in the gap between
+    /// them computes a garbage decor (observed 824/770/292 instead of the
+    /// real 146), which corrupted inner_size reads and compounded through
+    /// save/restore cycles into the shrinking-window bug.
+    pub(crate) decor_height: i32,
+    /// Listeners fired by `latch_decor_height` whenever the latched decor value
+    /// actually changes. Each listener returns `false` to have itself removed
+    /// after the call. tao uses this for event-driven set_inner_size
+    /// self-correction (startup decor convergence) instead of polling.
+    ///
+    /// INVARIANT: listeners run while the app RwLock is HELD (write) — they
+    /// must not re-enter any OpenHarmonyApp API (deadlock). Keep them lock-free:
+    /// channel sends / atomics only. Expected to stay LOW-COUNT (one per tao
+    /// window); every listener runs on every decor change under the lock.
+    pub(crate) decor_change_callbacks: Vec<(u64, std::sync::Arc<dyn Fn(i32) -> bool + Send + Sync>)>,
+    next_decor_cb_id: u64,
     /// Last inner size set via set_inner_size(). Packed as (w:u32)<<32 | (h:u32).
     /// 0 = unset. Used to make inner_size()→set_inner_size() idempotent on OHOS
     /// where windowSizeChange/windowRectChange may report content area, not outer area.
@@ -141,6 +163,9 @@ impl OpenHarmonyAppInner {
             configuration: Default::default(),
             rect: Default::default(),
             window_rects: HashMap::new(),
+            decor_height: 0,
+            decor_change_callbacks: Vec::new(),
+            next_decor_cb_id: 0,
             last_set_inner_size: 0,
             avoid_areas: HashMap::new(),
             init_context: AbilityInitContext::default(),
@@ -197,6 +222,44 @@ impl OpenHarmonyAppInner {
         self.render_owner.as_deref() == Some(owner)
     }
 
+    /// Latch the main-window decoration (title bar) height estimate.
+    ///
+    /// Called only from surface events (activate/update), the one point where
+    /// the XComponent rect is guaranteed fresh. The WM rect (windowRectChange)
+    /// is delivered before the surface relayout completes (observed ordering on
+    /// every resize in the DBG-D2 probe logs), so window_rects[0] is also
+    /// current here — the diff is the real title-bar inset. Out-of-range diffs
+    /// (surface mid-relayout, or window_rect not yet delivered) are rejected so
+    /// the cache keeps the last plausible value instead of transient garbage.
+    fn latch_decor_height(&mut self) {
+        // Physically impossible title-bar ceiling: real decor is ~146 px on the
+        // 2in1 reference device. Anything larger is a stale-rect diff.
+        const DECOR_HEIGHT_MAX: i32 = 320;
+        let Some(window) = self.window_rects.get(&0) else {
+            return;
+        };
+        let diff = window.height - self.rect.height;
+        let new_decor = if diff == 0 {
+            // Decorations hidden (fullscreen / setDecorations(false)): the
+            // surface fills the window exactly.
+            0
+        } else if diff > 0 && diff <= DECOR_HEIGHT_MAX {
+            diff
+        } else {
+            // diff < 0 or diff > MAX: transient — keep the previous estimate
+            // (and don't notify listeners).
+            return;
+        };
+        if new_decor == self.decor_height {
+            return;
+        }
+        self.decor_height = new_decor;
+        // Notify listeners (lock-free by contract — see field docs). Returning
+        // false removes the listener after this call.
+        self.decor_change_callbacks
+            .retain_mut(|(_, cb)| cb(new_decor));
+    }
+
     fn activate_surface(&mut self, owner: &str, raw_window: Option<RawWindow>, rect: Rect) -> bool {
         if !self.owns_render(owner) || self.surface_active {
             return false;
@@ -204,6 +267,7 @@ impl OpenHarmonyAppInner {
         self.raw_window = raw_window;
         self.rect = rect;
         self.surface_active = true;
+        self.latch_decor_height();
         true
     }
 
@@ -212,6 +276,7 @@ impl OpenHarmonyAppInner {
             return false;
         }
         self.rect = rect;
+        self.latch_decor_height();
         true
     }
 
@@ -693,6 +758,41 @@ impl OpenHarmonyApp {
         self.inner.read().unwrap().content_rect()
     }
 
+    /// Cached main-window decoration (title bar) height in physical px.
+    /// Latched on surface events only — see `OpenHarmonyAppInner::decor_height`.
+    /// tao's inner_size/set_inner_size/inner_position must read this instead of
+    /// live-diffing window_rect − content_rect (async update race).
+    pub fn decor_height(&self) -> i32 {
+        self.inner.read().map(|inner| inner.decor_height).unwrap_or(0)
+    }
+
+    /// Register a listener fired whenever the latched main-window decor height
+    /// changes (see `OpenHarmonyAppInner::decor_change_callbacks`). Returns an
+    /// id for `remove_decor_change_callback`. The listener runs on the thread
+    /// that latched the decor, with the app RwLock held — it must not call back
+    /// into OpenHarmonyApp APIs (deadlock); channel sends / atomics only.
+    pub fn register_decor_change_callback(
+        &self,
+        listener: std::sync::Arc<dyn Fn(i32) -> bool + Send + Sync>,
+    ) -> u64 {
+        self.inner
+            .write()
+            .map(|mut inner| {
+                let id = inner.next_decor_cb_id;
+                inner.next_decor_cb_id += 1;
+                inner.decor_change_callbacks.push((id, listener));
+                id
+            })
+            .unwrap_or(u64::MAX)
+    }
+
+    /// Remove a previously registered decor-change listener by id.
+    pub fn remove_decor_change_callback(&self, id: u64) {
+        if let Ok(mut inner) = self.inner.write() {
+            inner.decor_change_callbacks.retain(|(cb_id, _)| *cb_id != id);
+        }
+    }
+
     /// Per-window rect lookup (key = windowId; 0 = main window). See
     /// OpenHarmonyAppInner::window_rect_for. Used by tao's inner_size/outer_position/etc
     /// so each window reads its own rect instead of sharing a single field.
@@ -1118,5 +1218,159 @@ mod tests {
         // until their own destruction path runs. Assert key 0 is gone.
         assert!(inner.window_rects.get(&0).is_none());
         assert!(inner.avoid_areas.is_empty());
+    }
+
+    #[test]
+    fn decor_height_latches_only_plausible_surface_diffs() {
+        let mut inner = OpenHarmonyAppInner::new();
+        inner.claim_render_owner("owner").unwrap();
+        inner.window_rects.insert(
+            0,
+            Rect {
+                top: 0,
+                left: 0,
+                width: 2090,
+                height: 1394,
+            },
+        );
+        // Surface event: content 146px shorter than the window → latch 146.
+        assert!(inner.activate_surface(
+            "owner",
+            None,
+            Rect {
+                top: 0,
+                left: 0,
+                width: 2090,
+                height: 1248,
+            }
+        ));
+        assert_eq!(inner.decor_height, 146);
+
+        // Garbage diffs (surface mid-relayout while the WM rect already moved, or
+        // vice versa) are rejected — the cache keeps the last plausible value.
+        assert!(inner.update_surface_rect(
+            "owner",
+            Rect {
+                top: 0,
+                left: 0,
+                width: 2090,
+                height: 570,
+            }
+        ));
+        assert_eq!(inner.decor_height, 146, "824px diff must be rejected");
+        assert!(inner.update_surface_rect(
+            "owner",
+            Rect {
+                top: 0,
+                left: 0,
+                width: 2090,
+                height: 1468,
+            }
+        ));
+        assert_eq!(inner.decor_height, 146, "negative diff must be rejected");
+
+        // Decorations hidden (fullscreen / setDecorations(false)): surface fills
+        // the window exactly → latch 0.
+        assert!(inner.update_surface_rect(
+            "owner",
+            Rect {
+                top: 0,
+                left: 0,
+                width: 2090,
+                height: 1394,
+            }
+        ));
+        assert_eq!(inner.decor_height, 0);
+
+        // No main-window rect yet (before the first windowRectChange): the latch
+        // is a no-op and keeps the previous value.
+        inner.window_rects.remove(&0);
+        assert!(inner.update_surface_rect(
+            "owner",
+            Rect {
+                top: 0,
+                left: 0,
+                width: 2090,
+                height: 1248,
+            }
+        ));
+        assert_eq!(inner.decor_height, 0);
+    }
+
+    #[test]
+    fn decor_change_callbacks_fire_only_on_real_changes() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{Arc, Mutex};
+
+        let mut inner = OpenHarmonyAppInner::new();
+        inner.claim_render_owner("owner").unwrap();
+        inner.window_rects.insert(
+            0,
+            Rect { top: 0, left: 0, width: 2090, height: 1394 },
+        );
+
+        let seen: Arc<Mutex<Vec<i32>>> = Arc::new(Mutex::new(vec![]));
+        // Listener A: stays registered, records every value.
+        let calls_a = Arc::new(AtomicUsize::new(0));
+        let seen_a = seen.clone();
+        let a = {
+            let calls_a = calls_a.clone();
+            Arc::new(move |decor: i32| -> bool {
+                calls_a.fetch_add(1, Ordering::SeqCst);
+                seen_a.lock().unwrap().push(decor);
+                true
+            })
+        };
+        // Listener B: one-shot — removes itself after the first fire.
+        let calls_b = Arc::new(AtomicUsize::new(0));
+        let seen_b = seen.clone();
+        let b = {
+            let calls_b = calls_b.clone();
+            Arc::new(move |decor: i32| -> bool {
+                calls_b.fetch_add(1, Ordering::SeqCst);
+                seen_b.lock().unwrap().push(decor);
+                false
+            })
+        };
+        inner.decor_change_callbacks.push((0, a));
+        inner.decor_change_callbacks.push((1, b));
+        inner.next_decor_cb_id = 2;
+
+        // Latch 146 → both listeners fire once with the new value.
+        assert!(inner.activate_surface(
+            "owner",
+            None,
+            Rect { top: 0, left: 0, width: 2090, height: 1248 },
+        ));
+        assert_eq!(inner.decor_height, 146);
+        assert_eq!(calls_a.load(Ordering::SeqCst), 1);
+        assert_eq!(calls_b.load(Ordering::SeqCst), 1);
+
+        // Same value again (surface rect re-delivered with the same diff): no
+        // listener fires, one-shot B is already gone.
+        assert!(inner.update_surface_rect(
+            "owner",
+            Rect { top: 0, left: 0, width: 2090, height: 1248 },
+        ));
+        assert_eq!(calls_a.load(Ordering::SeqCst), 1);
+        assert_eq!(calls_b.load(Ordering::SeqCst), 1);
+
+        // Transient garbage (824px diff): rejected, no notification.
+        assert!(inner.update_surface_rect(
+            "owner",
+            Rect { top: 0, left: 0, width: 2090, height: 570 },
+        ));
+        assert_eq!(calls_a.load(Ordering::SeqCst), 1);
+
+        // Real change (decorations hidden → 0): only A remains and fires.
+        assert!(inner.update_surface_rect(
+            "owner",
+            Rect { top: 0, left: 0, width: 2090, height: 1394 },
+        ));
+        assert_eq!(inner.decor_height, 0);
+        assert_eq!(calls_a.load(Ordering::SeqCst), 2);
+        assert_eq!(calls_b.load(Ordering::SeqCst), 1);
+        assert_eq!(*seen.lock().unwrap(), vec![146, 146, 0]);
+        assert_eq!(inner.decor_change_callbacks.len(), 1, "one-shot listener must be removed");
     }
 }
