@@ -464,14 +464,16 @@ export class NativeAbility extends UIAbility {
           win.on("windowStatusChange", (statusType: window.WindowStatusType) => {
             const nativeModule: ESObject = AppStorage.get<ESObject>(NATIVE_MODULE_STORAGE_KEY);
             if (nativeModule && typeof nativeModule.notifyWindowStatus === 'function') {
-              nativeModule.notifyWindowStatus(windowId, statusType);
+              // 本地单 UIAbility 架构:主窗口恒为 tao windowId=0(upstream 的
+              // readWindowId() 首实例也返回 0);runtime-wry 按 tao window_id 路由。
+              nativeModule.notifyWindowStatus(0, statusType);
             }
           });
           // seed 初始态(官方 updateWindowInfo 模式),避免漏掉注册前状态。
           const initialStatus = win.getWindowStatus();
           const nativeModule: ESObject = AppStorage.get<ESObject>(NATIVE_MODULE_STORAGE_KEY);
           if (nativeModule && typeof nativeModule.notifyWindowStatus === 'function') {
-            nativeModule.notifyWindowStatus(windowId, initialStatus);
+            nativeModule.notifyWindowStatus(0, initialStatus);
           }
         } catch (e) {
           hilog.warn(DOMAIN, 'NativeAbility', 'windowStatusChange registration failed: %{public}s', String(e));
