@@ -22,6 +22,9 @@ mod account;
 #[cfg(feature = "updater")]
 mod updater;
 
+#[cfg(feature = "fault-injection")]
+mod fault_injection;
+
 pub mod version;
 
 #[cfg(feature = "window")]
@@ -109,6 +112,9 @@ pub use account::*;
 
 #[cfg(feature = "updater")]
 pub use updater::*;
+
+#[cfg(feature = "fault-injection")]
+pub use fault_injection::*;
 
 pub use version::*;
 

@@ -19,6 +19,7 @@ log = ["dep:log", "dep:ohos-hilog-binding"]
 updater = []
 window = []
 global_shortcut = []
+fault-injection = []
 
 [dependencies]
 # common dependencies
