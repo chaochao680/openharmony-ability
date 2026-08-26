@@ -18,7 +18,11 @@ param([string]$ScriptDir)
 $ErrorActionPreference = 'Stop'
 
 if (-not $ScriptDir) { $ScriptDir = $PSScriptRoot }
-$ScriptDir = $ScriptDir.TrimEnd('\')
+# Trim trailing backslashes AND quotes: pack.bat passes "%SCRIPT_DIR%" whose
+# trailing backslash escapes the closing quote in cmd's parser, so the arg
+# arrives with a literal trailing quote (which Join-Path then bakes into every
+# path, failing Test-Path with ItemExistsArgumentError).
+$ScriptDir = $ScriptDir.Trim('"\')
 
 # (plugin-dir, exported-class) — the 15 core bridge plugins.
 $plugins = @(
