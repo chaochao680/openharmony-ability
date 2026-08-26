@@ -2,6 +2,7 @@ import common from "@ohos.app.ability.common";
 import { FrameNode } from "@ohos.arkui.node";
 import { UIContext } from "@ohos.arkui.UIContext";
 import window from "@ohos.window";
+import { WindowManager, WindowSizeEventWrap, WindowRectEventWrap } from "../window/WindowManager";
 import {
   ApplicationLifecycle,
   BridgeCallContext,
@@ -19,6 +20,7 @@ import {
 } from "../ability/type";
 import { SerialTaskQueue } from "../runtime/SerialTaskQueue";
 import { CancellableTaskScope, TaskCancellationSignal } from "../runtime/CancellableTaskScope";
+import { FAULT_REGISTRY, FaultInjectionPlugin } from "./FaultInjection";
 
 const MAX_TIMEOUT_MS = 60_000;
 const MAX_PAYLOAD_BYTES = 512 * 1024;
@@ -275,6 +277,7 @@ class BridgeHost {
     this.abilityContext = abilityContext;
     this.pluginFactories = pluginFactories;
     this.installNodeSurfacePlugin();
+    this.installFaultInjectionPlugin();
   }
 
   /**
@@ -352,6 +355,21 @@ class BridgeHost {
    */
   private installNodeSurfacePlugin(): void {
     const plugin = new NodeSurfacePlugin(this);
+    this.plugins.set(plugin.id, {
+      plugin,
+      installed: false,
+      installAttempted: false,
+    });
+  }
+
+  /**
+   * Installs the built-in fault-injection plugin. It is always registered so the
+   * "enable"/"set-rule"/"clear" actions are available, but `FAULT_REGISTRY.enabled`
+   * defaults to `false` — production builds never call "enable", so `match()` is a
+   * no-op (first-line short-circuit) with negligible overhead.
+   */
+  private installFaultInjectionPlugin(): void {
+    const plugin = new FaultInjectionPlugin();
     this.plugins.set(plugin.id, {
       plugin,
       installed: false,
@@ -573,12 +591,16 @@ class BridgeHost {
         return;
       }
       try {
-        // Phase 2 (design.md D2): wrap windowId=0 — this registration is the main-window
-        // component window's second windowSizeChange registration (the first is in
-        // NativeAbility.ets), so it is always the main window (windowId 0). Phase 3 will
-        // route WindowResize by this id.
-        const wrapped: ESObject = { windowId: 0, width: size.width, height: size.height };
-        this.applicationLifecycle?.windowStageEventCallback.onWindowSizeChange(wrapped);
+        // Phase 3 (design.md D2/D3): route through per-window(0) throttle. This is the
+        // main-window component window's second windowSizeChange registration (the first
+        // is in NativeAbility.ets) — the throttle merges both sources for windowId=0.
+        const wrapped: WindowSizeEventWrap = { windowId: 0, width: size.width, height: size.height };
+        WindowManager.getInstance().throttledRectDispatch(0, wrapped, (w: object) => {
+          if (this.component !== state || this.closing || this.disposed) {
+            return;
+          }
+          this.applicationLifecycle?.windowStageEventCallback.onWindowSizeChange(w);
+        }, 'size');
       } catch {}
     };
     const onRectChange = (options: window.RectChangeOptions): void => {
@@ -586,11 +608,19 @@ class BridgeHost {
         return;
       }
       try {
-        // Phase 2 (design.md D2/D3): wrap windowId=0 (this path is always the main-window
-        // component window). The Rust window_rect_change closure routes the rect into
-        // key 0 of the per-window HashMap.
-        const wrapped: ESObject = { windowId: 0, reason: options.reason, rect: options.rect };
-        this.applicationLifecycle?.windowStageEventCallback.onWindowRectChange(wrapped);
+        // Phase 3 (design.md D2/D3/D5): route through per-window(0) throttle.
+        // Deep-copy rect fields (not system object ref) per design.md D5.
+        const wrapped: WindowRectEventWrap = {
+          windowId: 0,
+          reason: options.reason,
+          rect: { left: options.rect.left, top: options.rect.top, width: options.rect.width, height: options.rect.height }
+        };
+        WindowManager.getInstance().throttledRectDispatch(0, wrapped, (w: object) => {
+          if (this.component !== state || this.closing || this.disposed) {
+            return;
+          }
+          this.applicationLifecycle?.windowStageEventCallback.onWindowRectChange(w);
+        }, 'rect');
       } catch {}
     };
     const onAvoidAreaChange = (options: window.AvoidAreaOptions): void => {
@@ -894,6 +924,30 @@ class BridgeHost {
       .then(async (): Promise<BridgeTypedValue> => {
         await this.ensureActive(entry, callState);
         this.assertCallActive(pluginId, action, callState, "before invocation");
+        // ── Fault injection point A (async path) ──
+        // match() returns undefined when disabled (production) or no rule applies.
+        const fault = FAULT_REGISTRY.match(pluginId, action);
+        if (fault !== undefined) {
+          if (fault.kind === "error") {
+            throw new Error(`${fault.code}:${fault.message ?? "fault-injected"}`);
+          }
+          if (fault.kind === "exception") {
+            throw new Error(fault.message ?? "fault-injected exception");
+          }
+          if (fault.kind === "delay") {
+            await new Promise<void>((r) => setTimeout(r, fault.ms ?? 0));
+            // delay falls through to normal invokeAsync
+          }
+          if (fault.kind === "timeout") {
+            // P1 audit fix: throw instead of returning a pending Promise.
+            // A pending Promise would leak callState — removeActiveCall is bound
+            // in operation's .finally, which never settles. Throwing causes
+            // operation reject → .finally runs → cleanup proceeds normally.
+            throw new Error(
+              `Bridge call '${pluginId}.${action}' timed out after injected timeout`,
+            );
+          }
+        }
         const result = await asyncPlugin.invokeAsync(
           action,
           request,
@@ -951,6 +1005,18 @@ class BridgeHost {
       cancelled: false,
       cancelListeners: [],
     };
+    // ── Fault injection point B (sync path) ──
+    // Sync path only supports error/exception — delay/timeout would block the
+    // NAPI callback thread. match() returns undefined when disabled or no rule.
+    const syncFault = FAULT_REGISTRY.match(pluginId, action);
+    if (syncFault !== undefined) {
+      if (syncFault.kind === "error") {
+        throw new Error(`${syncFault.code}:${syncFault.message ?? "fault-injected"}`);
+      }
+      if (syncFault.kind === "exception") {
+        throw new Error(syncFault.message ?? "fault-injected exception");
+      }
+    }
     const result = syncPlugin.invokeSync(
       action,
       request,

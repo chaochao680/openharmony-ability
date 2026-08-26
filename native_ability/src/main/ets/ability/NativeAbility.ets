@@ -10,7 +10,7 @@ import { ApplicationLifecycle, Module, BridgeBindings, BridgePluginFactory, Brid
 import { MenuManager, PredefinedActionExecutor, setPredefinedActionExecutor } from "../helper/menu";
 import { AboutMetadataData } from "../helper/menu_types";
 import { setCurrentAbilityName } from "../helper/StatusBarUtils";
-import { WindowManager } from "../window/WindowManager";
+import { WindowManager, WindowSizeEventWrap, WindowRectEventWrap } from "../window/WindowManager";
 import { DOMAIN, NATIVE_MODULE_STORAGE_KEY } from '../helper/constants';
 import { setPrimaryWebviewControllerCallback } from "../components/DefaultXComponent";
 import { ProcessInitializer } from "./ProcessInitializer";
@@ -366,7 +366,7 @@ export class NativeAbility extends UIAbility {
     // windowRectChange handler invokes. Here we wire it to fan out to every lifecycle
     // (same forEachLifecycle pattern as the main-window registrations above). The
     // wrapped options already carry the windowId.
-    WindowManager.getInstance().registerRectChangeCallback((wrapped: ESObject) => {
+    WindowManager.getInstance().registerRectChangeCallback((wrapped: WindowRectEventWrap) => {
       this.forEachLifecycle((lifecycle) =>
         lifecycle.windowStageEventCallback.onWindowRectChange(wrapped),
       );
@@ -415,26 +415,36 @@ export class NativeAbility extends UIAbility {
     if (win) {
       try {
         win.on("windowSizeChange", (size: window.Size) => {
-          // Phase 2 (design.md D2): wrap the bare Size with the windowId so the Rust
-          // window_resize closure can read it. windowId=0 because this is the main
-          // window (getMainWindow). Phase 3 will route WindowResize by this id.
-          const wrapped = { windowId: 0, width: size.width, height: size.height };
-          this.forEachLifecycle((lifecycle) =>
-            lifecycle.windowStageEventCallback.onWindowSizeChange(wrapped),
-          );
+          // Phase 3 (design.md D2/D3): wrap with typed interface and route through
+          // per-window(0) throttle (leading+trailing 16ms). windowId=0 = main window.
+          // Double-registration dedup: BridgeHost also registers onSizeChange for the
+          // same windowId=0 — the throttle merges both sources automatically.
+          const wrapped: WindowSizeEventWrap = { windowId: 0, width: size.width, height: size.height };
+          WindowManager.getInstance().throttledRectDispatch(0, wrapped, (w: object) => {
+            this.forEachLifecycle((lifecycle) =>
+              lifecycle.windowStageEventCallback.onWindowSizeChange(w),
+            );
+          }, 'size');
         });
         win.on("windowRectChange", (options: window.RectChangeOptions) => {
+          // Phase 3 (design.md D3): RECOVER→menubar logic stays synchronous (UI logic,
+          // not throttled — must respond immediately on fullscreen exit).
           if (options.reason === window.RectChangeReason.RECOVER) {
             const cb = getMenuDataCallback("main");
             cb?.onMenubarVisible?.(true);
           }
-          // Phase 2 (design.md D2): wrap windowId=0 (main window) into the options so
-          // the Rust window_rect_change closure routes the rect to key 0 in the
-          // per-window HashMap (design.md D4).
-          const wrapped = { windowId: 0, reason: options.reason, rect: options.rect };
-          this.forEachLifecycle((lifecycle) =>
-            lifecycle.windowStageEventCallback.onWindowRectChange(wrapped),
-          );
+          // Phase 3 (design.md D2/D5): rect dispatch through per-window(0) throttle.
+          // Deep-copy rect fields (not system object ref) per design.md D5.
+          const wrapped: WindowRectEventWrap = {
+            windowId: 0,
+            reason: options.reason,
+            rect: { left: options.rect.left, top: options.rect.top, width: options.rect.width, height: options.rect.height }
+          };
+          WindowManager.getInstance().throttledRectDispatch(0, wrapped, (w: object) => {
+            this.forEachLifecycle((lifecycle) =>
+              lifecycle.windowStageEventCallback.onWindowRectChange(w),
+            );
+          }, 'rect');
         });
         win.on("avoidAreaChange", (options: window.AvoidAreaOptions) => {
           this.forEachLifecycle((lifecycle) =>

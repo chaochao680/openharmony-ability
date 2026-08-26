@@ -21,6 +21,23 @@ interface WindowEntry {
   // destroyWindow/removeWindow can call win.off("windowRectChange", handler) to avoid
   // leaking the listener past window destruction.
   rectChangeHandler?: (options: window.RectChangeOptions) => void;
+  // Phase 3 (design.md D4): set to true just before destroyWindow()/closeWindow Float
+  // path calls win.destroyWindow(). throttledRectDispatch checks this to discard
+  // in-flight events for a window being torn down (no consumers left).
+  destroying: boolean;
+}
+
+// Phase 3 (design.md D5): typed wrappers replacing ESObject, eliminating
+// arkts-limited-esobj WARN. These carry windowId through the NAPI boundary.
+export interface WindowSizeEventWrap {
+  windowId: number;
+  width: number;
+  height: number;
+}
+export interface WindowRectEventWrap {
+  windowId: number;
+  reason: window.RectChangeReason;
+  rect: window.Rect;
 }
 
 // Encapsulates all parameters for sub-window creation, replacing a 10-arg signature.
@@ -122,7 +139,20 @@ export class WindowManager {
   // out to every lifecycle.windowStageEventCallback.onWindowRectChange(wrapped). The
   // wrapped options carry the windowId (main window = 0, sub-window = the createSubWindow
   // windowId parameter).
-  private rectChangeCallback?: (options: ESObject) => void;
+  private rectChangeCallback?: (options: WindowRectEventWrap) => void;
+
+  // Phase 3 (design.md D2): per-window leading+trailing throttle for rect/size events.
+  // rect and size have different payload shapes, so each gets its own set of
+  // timers/pending/leading maps to prevent cross-contamination.
+  private static readonly THROTTLE_MS: number = 16;
+  // rect throttle state
+  private rectTimers: Map<number, number> = new Map();
+  private rectPending: Map<number, WindowRectEventWrap> = new Map();
+  private rectLeading: Map<number, boolean> = new Map();
+  // size throttle state
+  private sizeTimers: Map<number, number> = new Map();
+  private sizePending: Map<number, WindowSizeEventWrap> = new Map();
+  private sizeLeading: Map<number, boolean> = new Map();
 
   private constructor(context: common.UIAbilityContext) {
     this.context = context;
@@ -194,6 +224,18 @@ export class WindowManager {
     this.pendingJsHelperProxies.delete(wid);
     this.pendingBlurs.delete(wid);
     this.windowOpQueues.delete(wid);
+    // Phase 3 (design.md D4): clear throttle state for the passed windowId (secondary
+    // UIAbility instances have id>0, NOT hardcoded 0) to prevent stale timer dispatch.
+    const rectTimer = this.rectTimers.get(wid);
+    if (rectTimer !== undefined) { clearTimeout(rectTimer); }
+    const sizeTimer = this.sizeTimers.get(wid);
+    if (sizeTimer !== undefined) { clearTimeout(sizeTimer); }
+    this.rectTimers.delete(wid);
+    this.rectPending.delete(wid);
+    this.rectLeading.delete(wid);
+    this.sizeTimers.delete(wid);
+    this.sizePending.delete(wid);
+    this.sizeLeading.delete(wid);
     hilog.info(DOMAIN, 'WindowManager', 'UIAbility stage unregistered: id=%{public}d', wid);
   }
 
@@ -807,6 +849,12 @@ export class WindowManager {
       hilog.warn(DOMAIN, 'WindowManager', 'destroyWindow: window %{public}d not found', windowId);
       return;
     }
+    // Phase 3 (design.md D4): set destroying=true before win.destroyWindow() so
+    // in-flight throttled events are discarded (no consumers left after destroy).
+    const entry = this.windows.get(windowId);
+    if (entry) {
+      entry.destroying = true;
+    }
     try {
       await win.destroyWindow();
     } catch (e) {
@@ -842,6 +890,11 @@ export class WindowManager {
     if (!win) {
       hilog.warn(DOMAIN, 'WindowManager', 'closeWindow: window %{public}d not found', windowId);
       return;
+    }
+    // Phase 3 (design.md D4): set destroying=true before win.destroyWindow() (Float path).
+    const entry = this.windows.get(windowId);
+    if (entry) {
+      entry.destroying = true;
     }
     try {
       await win.destroyWindow();
@@ -983,7 +1036,7 @@ export class WindowManager {
     storage.setOrCreate('resizable', true);
     // Title (set by setWindowTitle → updates this via setWindowTitle impl)
     storage.setOrCreate('title', '');
-    this.windows.set(windowId, { window: win, storage });
+    this.windows.set(windowId, { window: win, storage, destroying: false });
 
     // Phase 2 (design.md D3): register this sub-window's windowRectChange handler.
     // This is the only clean registration point for Float sub-windows — createSubWindow
@@ -997,8 +1050,16 @@ export class WindowManager {
     let rectChangeHandler: ((options: window.RectChangeOptions) => void) | undefined =
       (options: window.RectChangeOptions): void => {
         try {
-          const wrapped: ESObject = { windowId, reason: options.reason, rect: options.rect };
-          this.rectChangeCallback?.(wrapped);
+          // Phase 3 (design.md D5): deep-copy rect fields — do not store system object ref.
+          // Phase 3 (design.md D3): route through per-window throttle (leading+trailing 16ms).
+          const wrapped: WindowRectEventWrap = {
+            windowId,
+            reason: options.reason,
+            rect: { left: options.rect.left, top: options.rect.top, width: options.rect.width, height: options.rect.height }
+          };
+          this.throttledRectDispatch(windowId, wrapped, (w: object) => {
+            this.rectChangeCallback?.(w as WindowRectEventWrap);
+          }, 'rect');
         } catch (e) {
           hilog.warn(DOMAIN, 'WindowManager', `Sub-window rectChange handler failed for %{public}d: %{public}s`, windowId, String(e));
         }
@@ -1350,11 +1411,95 @@ export class WindowManager {
     this.blurRefreshCallbacks.delete(Number(windowId));
   }
 
+  /**
+   * Phase 3 (design.md D2/D4/D6): per-window leading+trailing throttle for rect/size events.
+   *
+   * - Leading: first event within a 16ms window fires immediately (hilog edge=leading).
+   * - Trailing: subsequent events within the window are stored as pending; when the timer
+   *   fires, only the last pending payload is dispatched (hilog edge=trailing).
+   * - destroying guard: if the window's WindowEntry.destroying is true (set by
+   *   destroyWindow/closeWindow before win.destroyWindow()), events are discarded.
+   *   Main window (id=0) is not in the windows Map; undefined→falsy→unaffected.
+   *
+   * Callers MUST create the payload with field-copied values (not system object refs),
+   * per design.md D5 (pending payload deep-copy). The throttledRectDispatch itself does
+   * not re-copy — it stores the caller-constructed wrapped object reference, which is
+   * safe because the caller already deep-copied rect fields.
+   *
+   * Q1 (design.md Open Questions): stale listeners after onWindowStageDestroy may still
+   * fire — the try/catch around dispatch swallows errors. If hilog shows stale triggers,
+   * add win.off() in unregisterUIAbilityStage.
+   *
+   * Q2 (design.md Open Questions): BridgeHost and NativeAbility register on possibly
+   * different window instances (main window vs component window) — [THROTTLE-IN] hilog
+   * shows whether the two sources interleave for windowId=0.
+   */
+  throttledRectDispatch(
+    windowId: number,
+    payload: object,
+    dispatchFn: (w: object) => void,
+    kind: string,
+  ): void {
+    hilog.info(DOMAIN, 'WindowManager', `[THROTTLE-IN] wid=${windowId} kind=${kind}`);
+    // Discard events for windows being destroyed (main window id=0 not in Map → unaffected)
+    const entry = this.windows.get(windowId);
+    if (entry?.destroying) {
+      return;
+    }
+
+    const timersMap = kind === 'rect' ? this.rectTimers : this.sizeTimers;
+    const pendingMap = kind === 'rect' ? this.rectPending : this.sizePending;
+    const leadingMap = kind === 'rect' ? this.rectLeading : this.sizeLeading;
+
+    // Leading: first event in the window fires immediately
+    if (!leadingMap.get(windowId)) {
+      leadingMap.set(windowId, true);
+      hilog.info(DOMAIN, 'WindowManager', `[THROTTLE-OUT] wid=${windowId} kind=${kind} edge=leading`);
+      try {
+        dispatchFn(payload);
+      } catch (e) {
+        hilog.warn(DOMAIN, 'WindowManager', `[THROTTLE] leading dispatch failed wid=${windowId} kind=${kind}: ${String(e)}`);
+      }
+      // Set timer to end the leading window and flush trailing
+      const timer = setTimeout(() => {
+        try {
+          // Re-check destroying in case the window was destroyed during the timer
+          const e2 = this.windows.get(windowId);
+          if (e2?.destroying) {
+            timersMap.delete(windowId);
+            pendingMap.delete(windowId);
+            leadingMap.delete(windowId);
+            return;
+          }
+          const pending = pendingMap.get(windowId);
+          if (pending !== undefined) {
+            hilog.info(DOMAIN, 'WindowManager', `[THROTTLE-OUT] wid=${windowId} kind=${kind} edge=trailing`);
+            dispatchFn(pending);
+          }
+        } catch (e) {
+          hilog.warn(DOMAIN, 'WindowManager', `[THROTTLE] trailing dispatch failed wid=${windowId} kind=${kind}: ${String(e)}`);
+        } finally {
+          timersMap.delete(windowId);
+          pendingMap.delete(windowId);
+          leadingMap.delete(windowId);
+        }
+      }, WindowManager.THROTTLE_MS);
+      timersMap.set(windowId, timer);
+    } else {
+      // Trailing: store pending (caller already deep-copied fields into the wrapped object)
+      if (kind === 'rect') {
+        this.rectPending.set(windowId, payload as WindowRectEventWrap);
+      } else {
+        this.sizePending.set(windowId, payload as WindowSizeEventWrap);
+      }
+    }
+  }
+
   /** Phase 2 (design.md D3 注入小节): register the single rect-change fan-out callback.
    *  Called by NativeAbility.onWindowStageCreate; createSubWindow's per-window
    *  windowRectChange handler wraps { windowId, reason, rect } and invokes it, which
    *  forwards to every lifecycle.windowStageEventCallback.onWindowRectChange. */
-  registerRectChangeCallback(cb: (options: ESObject) => void): void {
+  registerRectChangeCallback(cb: (options: WindowRectEventWrap) => void): void {
     this.rectChangeCallback = cb;
   }
 
@@ -1531,5 +1676,19 @@ export class WindowManager {
     // prematurely clear flags still in use by sibling webviews in the same window.
     clearClipboardEnabled(windowId);
     clearZoomHotkeysEnabled(windowId);
+    // Phase 3 (design.md D4): clear throttle state — clearTimeout is the "already removed"
+    // guard (ArkTS single-threaded event loop guarantees timer callback cannot interleave
+    // with synchronous removeWindow). The `destroying` flag is the "destruction in progress"
+    // guard (destroyWindow called but removeWindow not yet run). Both are needed.
+    const rectTimer = this.rectTimers.get(windowId);
+    if (rectTimer !== undefined) { clearTimeout(rectTimer); }
+    const sizeTimer = this.sizeTimers.get(windowId);
+    if (sizeTimer !== undefined) { clearTimeout(sizeTimer); }
+    this.rectTimers.delete(windowId);
+    this.rectPending.delete(windowId);
+    this.rectLeading.delete(windowId);
+    this.sizeTimers.delete(windowId);
+    this.sizePending.delete(windowId);
+    this.sizeLeading.delete(windowId);
   }
 }
