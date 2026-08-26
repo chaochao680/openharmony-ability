@@ -918,6 +918,48 @@ pub fn drain_pending_window_closes() -> Vec<i32> {
         .unwrap_or_default()
 }
 
+/// Global queue for pending window status changes from ArkTS
+/// (`windowStatusChange` callbacks — maximize/minimize/fullscreen/floating).
+/// The runtime event loop drains this queue and feeds each (window_id, status)
+/// into tao's `apply_window_status` mirror bits.
+/// Ported from upstream PR#45 (fc8c3cf/a052d3f): status sync via NAPI direct call
+/// (not the old ArkHelper channel), so the port is verbatim.
+#[cfg(target_env = "ohos")]
+static PENDING_WINDOW_STATUS: Mutex<Vec<(i32, i32)>> = Mutex::new(Vec::new());
+
+/// NAPI function called from ArkTS `windowStatusChange` callbacks to report a
+/// window status change. Queues (window_id, status) for the Rust event loop.
+///
+/// `status` is the raw OHOS `WindowStatusType` value (transparently forwarded):
+/// FULL_SCREEN=1, MAXIMIZE=2, MINIMIZE=3, FLOATING=4, SPLIT_SCREEN=5.
+/// Semantic decoding happens on the tao side (`apply_window_status`); this layer
+/// only transports the integer.
+#[napi]
+#[cfg(target_env = "ohos")]
+pub fn notify_window_status(window_id: i32, status: i32) {
+    match PENDING_WINDOW_STATUS.lock() {
+        Ok(mut queue) => queue.push((window_id, status)),
+        Err(poisoned) => {
+            log::warn!(
+                "[OHOS] PENDING_WINDOW_STATUS mutex poisoned, recovering. window_id={} status={}",
+                window_id, status
+            );
+            poisoned.into_inner().push((window_id, status));
+        }
+    }
+}
+
+/// Drain all pending window status changes.
+/// Called by tauri-runtime-wry event loop (alongside `drain_pending_window_closes`)
+/// to回灌 system window status into tao mirror bits.
+#[cfg(target_env = "ohos")]
+pub fn drain_pending_window_status() -> Vec<(i32, i32)> {
+    PENDING_WINDOW_STATUS
+        .lock()
+        .map(|mut q| q.drain(..).collect())
+        .unwrap_or_default()
+}
+
 #[derive(Clone)]
 pub struct SaveSaver<'a> {
     pub(crate) app: &'a OpenHarmonyApp,

@@ -204,6 +204,73 @@ impl_bridge_napi_type!(WindowTouchableRequest, "ohos.window.TouchableRequest");
 
 #[napi(object)]
 #[derive(Clone, Debug)]
+pub struct WindowTopmostRequest {
+    pub window_id: i64,
+    pub topmost: bool,
+}
+
+impl_bridge_napi_type!(WindowTopmostRequest, "ohos.window.TopmostRequest");
+
+#[napi(object)]
+#[derive(Clone, Debug)]
+pub struct WindowTitleRequest {
+    pub window_id: i64,
+    pub title: String,
+}
+
+impl_bridge_napi_type!(WindowTitleRequest, "ohos.window.TitleRequest");
+
+#[napi(object)]
+#[derive(Clone, Debug)]
+pub struct WindowLimitsRequest {
+    pub window_id: i64,
+    pub min_width: i64,
+    pub min_height: i64,
+    pub max_width: i64,
+    pub max_height: i64,
+}
+
+impl_bridge_napi_type!(WindowLimitsRequest, "ohos.window.LimitsRequest");
+
+#[napi(object)]
+#[derive(Clone, Debug)]
+pub struct ImePositionRequest {
+    pub window_id: i64,
+    pub x: i64,
+    pub y: i64,
+}
+
+impl_bridge_napi_type!(ImePositionRequest, "ohos.window.ImePositionRequest");
+
+#[napi(object)]
+#[derive(Clone, Debug)]
+pub struct ImePositionResponse {
+    pub ok: bool,
+    pub code: i32,
+    pub message: String,
+}
+
+impl_bridge_napi_type!(ImePositionResponse, "ohos.window.ImePositionResponse");
+
+#[napi(object)]
+#[derive(Clone, Debug)]
+pub struct WindowDraggableRequest {
+    pub window_id: i64,
+    pub enable: bool,
+}
+
+impl_bridge_napi_type!(WindowDraggableRequest, "ohos.window.DraggableRequest");
+
+#[napi(object)]
+#[derive(Clone, Debug)]
+pub struct RealWindowIdResponse {
+    pub window_id: i64,
+}
+
+impl_bridge_napi_type!(RealWindowIdResponse, "ohos.window.RealWindowIdResponse");
+
+#[napi(object)]
+#[derive(Clone, Debug)]
 pub struct WindowAcknowledgement {
     pub accepted: bool,
 }
@@ -463,6 +530,126 @@ impl WindowClient {
 
     pub async fn is_window_minimized(&self, window_id: i64) -> Result<bool> {
         self.window_state("is-minimized", window_id).await
+    }
+
+    /// Keeps the window above all others. Requires API14+ and the
+    /// `ohos.permission.WINDOW_TOPMOST` permission (ArkTS side rejects otherwise).
+    pub async fn set_window_topmost(&self, window_id: i64, topmost: bool) -> Result<()> {
+        validate_window_id(window_id)?;
+        self.call::<WindowTopmostRequest, WindowAcknowledgement>(
+            "set-topmost",
+            WindowTopmostRequest { window_id, topmost },
+        )
+        .await?
+        .ensure()
+    }
+
+    pub async fn set_window_title(&self, window_id: i64, title: String) -> Result<()> {
+        validate_window_id(window_id)?;
+        if title.chars().count() > 1024 {
+            return Err(Error::from_reason(
+                "window title must be at most 1024 characters",
+            ));
+        }
+        self.call::<WindowTitleRequest, WindowAcknowledgement>(
+            "set-title",
+            WindowTitleRequest { window_id, title },
+        )
+        .await?
+        .ensure()
+    }
+
+    /// Sets min/max window size limits in physical pixels; 0 means no limit
+    /// (system default). Requires API11+.
+    pub async fn set_window_limits(
+        &self,
+        window_id: i64,
+        min_width: i64,
+        min_height: i64,
+        max_width: i64,
+        max_height: i64,
+    ) -> Result<()> {
+        validate_window_id(window_id)?;
+        for (name, value) in [
+            ("minWidth", min_width),
+            ("minHeight", min_height),
+            ("maxWidth", max_width),
+            ("maxHeight", max_height),
+        ] {
+            if value < 0 {
+                return Err(Error::from_reason(format!(
+                    "window limit {name} must be non-negative"
+                )));
+            }
+            validate_platform_integer(name, value)?;
+        }
+        self.call::<WindowLimitsRequest, WindowAcknowledgement>(
+            "set-limits",
+            WindowLimitsRequest {
+                window_id,
+                min_width,
+                min_height,
+                max_width,
+                max_height,
+            },
+        )
+        .await?
+        .ensure()
+    }
+
+    /// Emulates user attention via a system notification. Fire-and-forget on the
+    /// ArkTS side: publish failures (including the 1600004 enable-notification
+    /// retry path) are logged, not propagated — attention is best-effort.
+    pub async fn request_user_attention(&self, window_id: i64) -> Result<()> {
+        self.window_command("request-user-attention", window_id).await
+    }
+
+    /// Notifies the IME of the cursor rect (physical pixels). Requires a focused
+    /// editor; `ok=false, code=12800009` means none was focused, which is normal.
+    pub async fn set_ime_position(
+        &self,
+        window_id: i64,
+        x: i64,
+        y: i64,
+    ) -> Result<ImePositionResponse> {
+        validate_window_id(window_id)?;
+        validate_platform_integer("x coordinate", x)?;
+        validate_platform_integer("y coordinate", y)?;
+        self.call::<ImePositionRequest, ImePositionResponse>(
+            "set-ime-position",
+            ImePositionRequest {
+                window_id,
+                x,
+                y,
+            },
+        )
+        .await
+    }
+
+    /// Allows/forbids edge-drag resizing. Requires API20+.
+    pub async fn set_window_draggable(&self, window_id: i64, enable: bool) -> Result<()> {
+        validate_window_id(window_id)?;
+        self.call::<WindowDraggableRequest, WindowAcknowledgement>(
+            "set-draggable",
+            WindowDraggableRequest { window_id, enable },
+        )
+        .await?
+        .ensure()
+    }
+
+    /// Resolves the tao placeholder window id (0 = main window) to the real
+    /// OHOS window id required by native `OH_WindowManager_*` C APIs.
+    pub async fn get_real_window_id(&self, window_id: i64) -> Result<i64> {
+        validate_window_id(window_id)?;
+        let real_id = self
+            .call::<WindowIdRequest, RealWindowIdResponse>(
+                "get-real-window-id",
+                WindowIdRequest { window_id },
+            )
+            .await?
+            .window_id;
+        validate_window_id(real_id)?;
+        Ok(real_id)
     }
 
     async fn window_command(&self, action: &str, window_id: i64) -> Result<()> {

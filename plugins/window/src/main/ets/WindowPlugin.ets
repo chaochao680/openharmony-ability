@@ -1,6 +1,11 @@
 import window from "@ohos.window";
 import { deviceInfo } from "@kit.BasicServicesKit";
 import { hilog } from "@kit.PerformanceAnalysisKit";
+// Static imports are REQUIRED here: dynamic import('@kit.NotificationKit') /
+// ('@kit.IMEKit') fail to load their native so on device (libnotificationkit.z.so
+// not exist) — same lesson as the print fix (2026-08-20).
+import { notificationManager } from "@kit.NotificationKit";
+import { inputMethod } from "@kit.IMEKit";
 import {
   BridgeCallContext,
   BridgePluginHookContext,
@@ -26,10 +31,21 @@ const MOVE_REQUEST_TYPE = "ohos.window.MoveRequest";
 const RESIZE_REQUEST_TYPE = "ohos.window.ResizeRequest";
 const FOCUSABLE_REQUEST_TYPE = "ohos.window.FocusableRequest";
 const TOUCHABLE_REQUEST_TYPE = "ohos.window.TouchableRequest";
+const TOPMOST_REQUEST_TYPE = "ohos.window.TopmostRequest";
+const TITLE_REQUEST_TYPE = "ohos.window.TitleRequest";
+const LIMITS_REQUEST_TYPE = "ohos.window.LimitsRequest";
+const IME_POSITION_REQUEST_TYPE = "ohos.window.ImePositionRequest";
+const DRAGGABLE_REQUEST_TYPE = "ohos.window.DraggableRequest";
 const ACKNOWLEDGEMENT_TYPE = "ohos.window.Acknowledgement";
 const STATE_RESPONSE_TYPE = "ohos.window.StateResponse";
+const IME_POSITION_RESPONSE_TYPE = "ohos.window.ImePositionResponse";
+const REAL_WINDOW_ID_RESPONSE_TYPE = "ohos.window.RealWindowIdResponse";
 const MAX_SAFE_INTEGER: number = 9007199254740991;
 const MAX_ARGB_COLOR: number = 0xffffffff;
+
+// Monotonic notification id for request-user-attention — avoids concurrent
+// calls sharing a fixed id and overwriting each other (upstream PR#45 review F3).
+let attentionNotifId: number = 0;
 
 function isSafeInteger(value: number): boolean {
   return Number.isInteger(value) && Math.abs(value) <= MAX_SAFE_INTEGER;
@@ -100,6 +116,35 @@ interface WindowTouchableRequest {
   touchable: boolean;
 }
 
+interface WindowTopmostRequest {
+  windowId: number;
+  topmost: boolean;
+}
+
+interface WindowTitleRequest {
+  windowId: number;
+  title: string;
+}
+
+interface WindowLimitsRequest {
+  windowId: number;
+  minWidth: number;
+  minHeight: number;
+  maxWidth: number;
+  maxHeight: number;
+}
+
+interface ImePositionRequest {
+  windowId: number;
+  x: number;
+  y: number;
+}
+
+interface WindowDraggableRequest {
+  windowId: number;
+  enable: boolean;
+}
+
 class AvoidAreaRectResponse {
   readonly top: number;
   readonly left: number;
@@ -159,6 +204,26 @@ class WindowStateResponse {
 
   constructor(value: boolean) {
     this.value = value;
+  }
+}
+
+class ImePositionResponse {
+  readonly ok: boolean;
+  readonly code: number;
+  readonly message: string;
+
+  constructor(ok: boolean, code: number, message: string) {
+    this.ok = ok;
+    this.code = code;
+    this.message = message;
+  }
+}
+
+class RealWindowIdResponse {
+  readonly windowId: number;
+
+  constructor(windowId: number) {
+    this.windowId = windowId;
   }
 }
 
@@ -320,6 +385,71 @@ function parseTouchableRequest(payload: BridgeTypedValue): WindowTouchableReques
   const request = payload.value as WindowTouchableRequest;
   if (!isWindowId(request?.windowId) || typeof request.touchable !== "boolean") {
     throw new Error("set-touchable.touchable must be a boolean");
+  }
+  return request;
+}
+
+function parseTopmostRequest(payload: BridgeTypedValue): WindowTopmostRequest {
+  if (payload.typeName !== TOPMOST_REQUEST_TYPE || typeof payload.value !== "object") {
+    throw new Error(`ohos.window.set-topmost requires bridge type ${TOPMOST_REQUEST_TYPE}`);
+  }
+  const request = payload.value as WindowTopmostRequest;
+  if (!isWindowId(request?.windowId) || typeof request.topmost !== "boolean") {
+    throw new Error("set-topmost requires a valid windowId and boolean topmost");
+  }
+  return request;
+}
+
+function parseTitleRequest(payload: BridgeTypedValue): WindowTitleRequest {
+  if (payload.typeName !== TITLE_REQUEST_TYPE || typeof payload.value !== "object") {
+    throw new Error(`ohos.window.set-title requires bridge type ${TITLE_REQUEST_TYPE}`);
+  }
+  const request = payload.value as WindowTitleRequest;
+  if (!isWindowId(request?.windowId) || typeof request.title !== "string") {
+    throw new Error("set-title requires a valid windowId and string title");
+  }
+  return request;
+}
+
+function parseLimitsRequest(payload: BridgeTypedValue): WindowLimitsRequest {
+  if (payload.typeName !== LIMITS_REQUEST_TYPE || typeof payload.value !== "object") {
+    throw new Error(`ohos.window.set-limits requires bridge type ${LIMITS_REQUEST_TYPE}`);
+  }
+  const request = payload.value as WindowLimitsRequest;
+  if (
+    !isWindowId(request?.windowId) ||
+    !isSafeInteger(request.minWidth) ||
+    !isSafeInteger(request.minHeight) ||
+    !isSafeInteger(request.maxWidth) ||
+    !isSafeInteger(request.maxHeight) ||
+    request.minWidth < 0 ||
+    request.minHeight < 0 ||
+    request.maxWidth < 0 ||
+    request.maxHeight < 0
+  ) {
+    throw new Error("set-limits requires a valid windowId and non-negative integer limits");
+  }
+  return request;
+}
+
+function parseImePositionRequest(payload: BridgeTypedValue): ImePositionRequest {
+  if (payload.typeName !== IME_POSITION_REQUEST_TYPE || typeof payload.value !== "object") {
+    throw new Error(`ohos.window.set-ime-position requires bridge type ${IME_POSITION_REQUEST_TYPE}`);
+  }
+  const request = payload.value as ImePositionRequest;
+  if (!isWindowId(request?.windowId) || !isSafeInteger(request?.x) || !isSafeInteger(request?.y)) {
+    throw new Error("set-ime-position requires a valid windowId and integer x/y");
+  }
+  return request;
+}
+
+function parseDraggableRequest(payload: BridgeTypedValue): WindowDraggableRequest {
+  if (payload.typeName !== DRAGGABLE_REQUEST_TYPE || typeof payload.value !== "object") {
+    throw new Error(`ohos.window.set-draggable requires bridge type ${DRAGGABLE_REQUEST_TYPE}`);
+  }
+  const request = payload.value as WindowDraggableRequest;
+  if (!isWindowId(request?.windowId) || typeof request.enable !== "boolean") {
+    throw new Error("set-draggable requires a valid windowId and boolean enable");
   }
   return request;
 }
@@ -526,6 +656,128 @@ export class WindowPlugin extends AsyncPluginBase {
       return this.windowState("is-minimized", payload, context);
     }
 
+    if (action === "set-topmost") {
+      // Delegates to WindowManager.setWindowTopmost (API14 guard + WINDOW_TOPMOST
+      // permission handling live there, ported from upstream PR#45).
+      const request = parseTopmostRequest(payload);
+      WindowManager.getInstance().setWindowTopmost(request.windowId, request.topmost);
+      return { typeName: ACKNOWLEDGEMENT_TYPE, value: new WindowAcknowledgement(true) };
+    }
+
+    if (action === "set-title") {
+      // Delegates to WindowManager.setWindowTitle (API9+, main window + Float sub-windows).
+      const request = parseTitleRequest(payload);
+      WindowManager.getInstance().setWindowTitle(request.windowId, request.title);
+      return { typeName: ACKNOWLEDGEMENT_TYPE, value: new WindowAcknowledgement(true) };
+    }
+
+    if (action === "set-limits") {
+      // Delegates to WindowManager.setWindowLimits (API11+, px, 0 = no limit).
+      const request = parseLimitsRequest(payload);
+      WindowManager.getInstance().setWindowLimits(
+        request.windowId,
+        request.minWidth,
+        request.minHeight,
+        request.maxWidth,
+        request.maxHeight,
+      );
+      return { typeName: ACKNOWLEDGEMENT_TYPE, value: new WindowAcknowledgement(true) };
+    }
+
+    if (action === "request-user-attention") {
+      // OHOS has no window-layer requestAttention API; emulate via a notification
+      // (upstream PR#45). Fire-and-forget: publish failure is non-fatal and the
+      // 1600004 (notification disabled) path pops the system authorization dialog
+      // then retries. Unlike the old ArkHelper version we run in an async bridge
+      // context, so hilog is safe everywhere here.
+      const request = parseWindowIdRequest(payload);
+      const notifId = ++attentionNotifId;
+      const doPublish = (): void => {
+        notificationManager.publish({
+          id: notifId,
+          content: {
+            contentType: notificationManager.ContentType.NOTIFICATION_CONTENT_BASIC_TEXT,
+            normal: { title: "Tauri App", text: "请查看应用窗口" as string },
+          } as ESObject,
+        } as ESObject).then(() => {
+          hilog.info(DOMAIN, TAG, "request-user-attention: published OK (id=%{public}d, window=%{public}d)", notifId, request.windowId);
+        }).catch((err: ESObject) => {
+          const code = (err && (err as ESObject).code) ? (err as ESObject).code : -1;
+          hilog.warn(DOMAIN, TAG, "request-user-attention: publish failed id=%{public}d code=%{public}s", notifId, String(code));
+          // 1600004 = notification not enabled → pop the system authorization
+          // dialog (requestEnableNotification) and retry once.
+          if (code === 1600004) {
+            notificationManager.requestEnableNotification().then(() => {
+              hilog.info(DOMAIN, TAG, "request-user-attention: enabled, retry publish (id=%{public}d)", notifId);
+              doPublish();
+            }).catch((e2: ESObject) => {
+              hilog.warn(DOMAIN, TAG, "request-user-attention: requestEnableNotification failed: %{public}s", JSON.stringify(e2));
+            });
+          }
+        });
+      };
+      doPublish();
+      return { typeName: ACKNOWLEDGEMENT_TYPE, value: new WindowAcknowledgement(true) };
+    }
+
+    if (action === "set-ime-position") {
+      // Notifies the IME of the cursor rect via updateCursor (API10+). tao passes
+      // physical pixels; CursorInfo left/top are px too — pass through directly.
+      // Requires a focused editor (an HTML input counts — ArkWeb goes through the
+      // system IME framework); without one the call fails with 12800009, which is
+      // normal for any app. D3.8: awaits updateCursor and returns the result
+      // directly instead of the old ArkHelper poll/getImePositionResult scheme.
+      const request = parseImePositionRequest(payload);
+      const cursorInfo: ESObject = {
+        left: Math.round(request.x),
+        top: Math.round(request.y),
+        width: 1, // cursor width (px)
+        height: 24, // cursor height (px, approximates line height)
+      };
+      try {
+        await inputMethod.getController().updateCursor(cursorInfo);
+        hilog.info(DOMAIN, TAG, "set-ime-position: updateCursor OK window=%{public}d x=%{public}d y=%{public}d", request.windowId, request.x, request.y);
+        return { typeName: IME_POSITION_RESPONSE_TYPE, value: new ImePositionResponse(true, 0, "OK") };
+      } catch (error) {
+        const code = (error && (error as ESObject).code) ? (error as ESObject).code : -1;
+        // 12800009 = input method client detached — no focused editor; caller decides severity.
+        hilog.warn(DOMAIN, TAG, "set-ime-position: updateCursor failed code=%{public}s", String(code));
+        return { typeName: IME_POSITION_RESPONSE_TYPE, value: new ImePositionResponse(false, code as number, String(error)) };
+      }
+    }
+
+    if (action === "set-draggable") {
+      // enableDrag (API20+) — allow/forbid edge-drag resizing. The bridge context
+      // propagates errors cleanly, so unsupported API levels surface as a real
+      // error instead of the old ArkHelper no-op.
+      const request = parseDraggableRequest(payload);
+      if (deviceInfo.sdkApiVersion < 20) {
+        throw new Error(`set-draggable requires API20+, current ${deviceInfo.sdkApiVersion}`);
+      }
+      const win = WindowManager.getInstance().getWindow(request.windowId);
+      if (!win) {
+        throw new Error(`set-draggable: window ${request.windowId} not found`);
+      }
+      try {
+        await win.enableDrag(request.enable);
+        return { typeName: ACKNOWLEDGEMENT_TYPE, value: new WindowAcknowledgement(true) };
+      } catch (error) {
+        throw new Error(`set-draggable failed: ${String(error)}`);
+      }
+    }
+
+    if (action === "get-real-window-id") {
+      // Resolves tao's placeholder windowId (0 = main window) to the REAL OHOS
+      // window id (getWindowProperties().id) required by native
+      // OH_WindowManager_* C APIs (e.g. the cursor-grab FFI).
+      const request = parseWindowIdRequest(payload);
+      const realId = WindowManager.getInstance().getRealWindowId(request.windowId);
+      if (realId < 0) {
+        throw new Error(`get-real-window-id: window ${request.windowId} not found`);
+      }
+      return { typeName: REAL_WINDOW_ID_RESPONSE_TYPE, value: new RealWindowIdResponse(realId) };
+    }
+
     throw new Error(`Unsupported ohos.window action '${action}'`);
   }
 
@@ -553,7 +805,11 @@ export class WindowPlugin extends AsyncPluginBase {
         // the window visible, and showWindow() resets the window position to centered
         // state, causing the window to jump to the center of the screen.
       } else if (action === "show") {
-        await win.showWindow();
+        // A minimized UIAbility main window cannot be brought back by
+        // showWindow() — only restore() can (upstream PR#45). Delegate to
+        // WindowManager.showWindowMethod, which picks restore() for a minimized
+        // main window and showWindow() for sub-windows.
+        WindowManager.getInstance().showWindowMethod(request.windowId);
       } else if (action === "destroy-window") {
         // id 0 is the host Ability's own main window — it cannot be destroyed by the
         // plugin (it is owned by the Ability lifecycle, not create-os-window). Only
