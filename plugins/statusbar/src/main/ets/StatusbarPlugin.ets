@@ -192,7 +192,22 @@ export class StatusbarPlugin extends AsyncPluginBase {
       hilog.info(DOMAIN, "StatusbarPlugin", `add: quickOperation abilityName="${quickOperation.abilityName}" title="${quickOperation.title}" height=${quickOperation.height} moduleName=${quickOperation.moduleName} loadingStatus=${quickOperation.loadingStatus} menuLen=${statusBarGroupMenu.length}`);
 
       try {
-        statusBarManager.addToStatusBar(abilityContext, opts);
+        // Use the AsyncCallback overload (API 14+). JsStatusbarManager builds
+        // its ScbServerMessageReceiver ASYNCHRONOUSLY ~14ms after the sync
+        // addToStatusBar() call returns; registering click handlers on the
+        // sync return binds them to the previous receiver, which the new
+        // receiver then replaces — rightMenuClick/statusBarIconClick listeners
+        // are silently dropped. Registering in the completion callback runs
+        // strictly after the new receiver exists.
+        statusBarManager.addToStatusBar(abilityContext, opts, (err: BusinessError) => {
+          if (err) {
+            hilog.error(DOMAIN, "StatusbarPlugin", "addToStatusBar callback err: %{public}d %{public}s", err.code, err.message);
+            return;
+          }
+          reRegisterStatusBarClickHandlers();
+        });
+        // Keep the sync registration as a baseline: harmless (off+on), and
+        // preserves the pre-existing behaviour if the callback never fires.
         reRegisterStatusBarClickHandlers();
         return { typeName: ACKNOWLEDGEMENT_TYPE, value: new StatusbarAcknowledgement(true) };
       } catch (e) {
