@@ -105,7 +105,10 @@ struct MainPage {
           }
           return true;
         }
-        // ESC to restore menubar from fullscreen
+        // ESC to exit fullscreen / restore menubar. All fullscreen entry points
+        // (window-API set_fullscreen AND predefined menu fullscreen) hide the
+        // menubar via WindowManager.setFullscreen (macOS semantics), so the
+        // menubar-invisible condition alone covers every case.
         if (event.type === KeyType.Down && event.keyCode === KeyCode.KEYCODE_ESCAPE && !isMenubarVisible(MAIN_WINDOW_ID)) {
           const recoverFn = getMenuBarRecoverFn(MAIN_WINDOW_ID);
           if (recoverFn) {

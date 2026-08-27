@@ -1,13 +1,12 @@
 import { MenuItemData, PredefinedType, AboutMetadataData } from './menu_types';
 import web_webview from '@ohos.web.webview';
 import window from '@ohos.window';
-import display from '@ohos.display';
 import common from '@ohos.app.ability.common';
 import { Want } from '@kit.AbilityKit';
 import { pasteboard } from '@kit.BasicServicesKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { WindowManager } from '../window/WindowManager';
-import { getMenuDataCallback, windowKeyForId } from '../components/MenuBarComponent';
+import { getMenuDataCallback } from '../components/MenuBarComponent';
 import { DOMAIN, NATIVE_MODULE_STORAGE_KEY, MAIN_WINDOW_ID } from './constants';
 
 // Global executor singleton — shared by Menu and Tray execution paths
@@ -221,8 +220,6 @@ export class PredefinedActionExecutor {
         targetWindowId === undefined ? 'undefined(tray)' : String(targetWindowId),
         resolvedWindowId);
 
-      const windowKey = windowKeyForId(resolvedWindowId);
-
       // Get target window's webview controller for clipboard/edit operations (fallback to this.controller)
       const targetController = this.getTargetController(resolvedWindowId);
 
@@ -328,30 +325,24 @@ export class PredefinedActionExecutor {
           await win?.maximize(window.MaximizePresentation.FOLLOW_APP_IMMERSIVE_SETTING);
           break;
         case 'fullscreen': {
-          // Hide menubar via callback (MW-5)
-          const cb = getMenuDataCallback(windowKey);
-          cb?.onMenubarVisible?.(false);
-          cb?.onMenuShown?.(false);
-          try {
-            const displayInfo = display.getDefaultDisplaySync();
-            if (displayInfo.width > 800) {
-              await win?.maximize(window.MaximizePresentation.ENTER_IMMERSIVE);
-            } else {
-              await win?.setWindowLayoutFullScreen(true);
-              await win?.setWindowSystemBarEnable([]);
-            }
-          } catch (e) {
-            await win?.maximize(window.MaximizePresentation.ENTER_IMMERSIVE);
-          }
+          // Delegate to WindowManager.setFullscreen so predefined fullscreen
+          // matches the window-API (WindowPlugin set-fullscreen) behaviour:
+          // desktop maximize(ENTER_IMMERSIVE) + hide title bar/Dock hover,
+          // mobile layout fullscreen + hide system bars, serializeOp-guarded,
+          // and the Tauri menubar hides via MW-5 callbacks (centralized in
+          // WindowManager.setFullscreen). The previous inline version only did
+          // a bare immersive maximize on desktop — the system title bar / Dock
+          // stayed visible, diverging from set_fullscreen().
+          WindowManager.getInstance().setFullscreen(resolvedWindowId, true);
           break;
         }
         case 'recover': {
-          // Show menubar via callback (MW-5)
-          const cb = getMenuDataCallback(windowKey);
-          cb?.onMenubarVisible?.(true);
-          await win?.recover();
-          // FOLLOW_APP_IMMERSIVE_SETTING preserves the existing fullscreen layout,
-          // so no setWindowLayoutFullScreen(true) needed after recover.
+          // Exit via the same dual-path (desktop recover() + restore title
+          // bar/Dock hover; mobile exit layout fullscreen + restore system
+          // bars; menubar restored via MW-5 callbacks). Harmless when the
+          // window is not fullscreen — the desktop recover() also serves the
+          // plain un-maximize case.
+          WindowManager.getInstance().setFullscreen(resolvedWindowId, false);
           break;
         }
         case 'quit':

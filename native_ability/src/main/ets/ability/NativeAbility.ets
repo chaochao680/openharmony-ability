@@ -324,7 +324,11 @@ export class NativeAbility extends UIAbility {
     });
 
     setMenuBarRecoverFn(0, () => {
-      mainWindow.recover();
+      // Esc exit from predefined fullscreen: dual-path exit so the title bar /
+      // Dock hover hidden on entry (WindowManager.setFullscreen desktop path)
+      // are restored too. The internal recover() triggers
+      // windowRectChange(RECOVER) → menubar restore (see on("windowRectChange")).
+      WindowManager.getInstance().setFullscreen(0, false);
     });
 
     setPrimaryWebviewControllerCallback((controller: ESObject) => {

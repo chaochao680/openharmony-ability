@@ -9,6 +9,7 @@ import display from '@ohos.display';
 import { RustWebviewNodeController, WebviewInitData, WebviewStyle } from '../webview/DefaultWebview';
 import { ProxyJsHelper } from '../webview/Utils';
 import * as FloatPage from '../components/FloatPage';
+import { getMenuDataCallback, windowKeyForId } from '../components/MenuBarComponent';
 import { DOMAIN } from '../helper/constants';
 import { objectAssign } from '../helper';
 import { clearClipboardEnabled, clearZoomHotkeysEnabled, setClipboardEnabled, setZoomHotkeysEnabled } from '../helper/accelerator_matcher';
@@ -93,7 +94,7 @@ export class WindowManager {
   // windows (id=0 or id>0) are equal and system-managed.
   private windowKinds: Map<number, WindowKind> = new Map();
 
-  // Per-window operation serialization queue. Window operations (maximize, recover,
+  // windowOpQueues: Per-window operation serialization queue. Window operations (maximize, recover,
   // fullscreen, minimize) are async Promises that must not overlap — e.g., calling
   // maximize while a fullscreen-exit recover() is still pending causes race conditions.
   // Each window gets its own Promise chain; new ops are appended via .then().
@@ -698,14 +699,27 @@ export class WindowManager {
   // Mobile (display width <= 800): setWindowLayoutFullScreen(true) +
   //   setWindowSystemBarEnable([]) to hide BOTH status + nav bars. Exit via
   //   setWindowLayoutFullScreen(false) + setWindowSystemBarEnable(['status','navigation']).
-  // The width threshold and mobile path follow the pattern in menu.ets.
   // setTitleAndDockHoverShown is a PC/2in1-only API and would throw on phones,
   // so it must not be called on the mobile path.
   // Any failure in the primary path falls back to the desktop immersive maximize.
+  // The predefined menu fullscreen (menu.ets PredefinedActionExecutor) and the
+  // Esc exit path (NativeAbility menubar recoverFn) both delegate here.
   setFullscreen(windowId: number, on: boolean): void {
     const win = this.getWindow(windowId);
     if (!win) { this.logNotFound('setFullscreen', windowId); return; }
     hilog.info(DOMAIN, 'WindowManager', 'setFullscreen %{public}d on=%{public}s ENTER', windowId, String(on));
+
+    // Menubar follows fullscreen state (macOS semantics, design.md MW-5/D3):
+    // hide on entry, restore on exit. Centralized here so ALL fullscreen
+    // entry points (window-API set_fullscreen, predefined menu fullscreen,
+    // Esc exit) behave identically. The exit path is additionally covered by
+    // the windowRectChange(RECOVER) → onMenubarVisible(true) handler in
+    // NativeAbility (D3) — double-restore is idempotent.
+    const menuCb = getMenuDataCallback(windowKeyForId(windowId));
+    menuCb?.onMenubarVisible?.(on ? false : true);
+    if (on) {
+      menuCb?.onMenuShown?.(false);
+    }
 
     const isDesktop = display.getDefaultDisplaySync().width > 800;
 
