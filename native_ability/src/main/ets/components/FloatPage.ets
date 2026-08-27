@@ -223,7 +223,12 @@ struct FloatPage {
                 .onClick(() => {
                   try {
                     if (this.isMaximized) {
-                      WindowManager.getInstance().restoreWindow(this.windowId);
+                      // recover() switches MAXIMIZE/FULL_SCREEN → FLOATING (API11+) — the
+                      // documented inverse of maximize(). restore() is main-window-only
+                      // (restores a minimized MAIN window on 2in1, API14+); on a maximized
+                      // Float sub-window it is the wrong API. Mirrors tao set_maximized(false)
+                      // → recover_window (plugin-window bridge).
+                      WindowManager.getInstance().recoverWindow(this.windowId);
                     } else {
                       WindowManager.getInstance().maximizeWindow(this.windowId);
                     }

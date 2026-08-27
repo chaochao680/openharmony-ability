@@ -1032,7 +1032,26 @@ export class WindowManager {
     let win: window.Window;
     try {
       // Use windowStage.createSubWindow(name) instead of window.createWindow(config)
-      win = await this.uiAbilityStages.get(0)?.createSubWindow(name);
+      // API19+: use createSubWindowWithOptions with maximizeSupported:true — win.maximize()
+      // on a sub-window is rejected by WMS (1300004 "Only support main or sub Window")
+      // unless the sub-window declared maximize capability at creation
+      // (SubWindowOptions.maximizeSupported defaults to false). title/decorEnabled are
+      // required fields (API11+); decorEnabled:false keeps the system decoration off —
+      // FloatPage draws its own title bar. On non-2in1/Tablet devices maximizeSupported
+      // is silently ignored (documented no-op), so it is safe to always pass on API19+.
+      // This also unlocks maximize for the menu PredefinedMenuItem 'maximize' path and
+      // setFullscreen's maximize(ENTER_IMMERSIVE) on sub-windows (same WMS gate).
+      if (deviceInfo.sdkApiVersion >= 19) {
+        const opts: window.SubWindowOptions = {
+          title: '',
+          decorEnabled: false,
+          maximizeSupported: true,
+        };
+        win = await this.uiAbilityStages.get(0)?.createSubWindowWithOptions(name, opts);
+      } else {
+        // API<19: maximizeSupported does not exist in the SDK typings — plain path.
+        win = await this.uiAbilityStages.get(0)?.createSubWindow(name);
+      }
       hilog.info(DOMAIN, 'WindowManager', `Sub-window created successfully: %{public}d`, windowId);
     } catch (err) {
       hilog.error(DOMAIN, 'WindowManager', `Failed to create sub-window: %{public}s`, JSON.stringify(err));
