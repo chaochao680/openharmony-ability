@@ -1018,6 +1018,31 @@ pub fn drain_pending_window_closes() -> Vec<i32> {
         .unwrap_or_default()
 }
 
+/// ─── Cursor position tracking ─────────────────────────────────────────────
+/// ArkTS `MainPage.onMouse` calls `update_cursor_position` via NAPI because the
+/// NDK `DispatchMouseEvent` path does not fire while the cursor is over the
+/// WebView (which covers the window). tao's `cursor_position()` reads these
+/// atomics. Dropped during the pluginize refactor (restored from 5941dfb).
+
+/// Last known cursor X position, in vp relative to the MainPage component
+/// (f64 stored as u64 bits).
+#[cfg(target_env = "ohos")]
+pub static CURSOR_POSITION_X: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Last known cursor Y position, in vp relative to the MainPage component
+/// (f64 stored as u64 bits).
+#[cfg(target_env = "ohos")]
+pub static CURSOR_POSITION_Y: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// NAPI function called from the ArkTS `onMouse` handler (Move/Press) to
+/// update the tracked cursor position. Coordinates are MainPage-relative vp.
+#[napi]
+#[cfg(target_env = "ohos")]
+pub fn update_cursor_position(x: f64, y: f64) {
+    CURSOR_POSITION_X.store(x.to_bits(), std::sync::atomic::Ordering::Relaxed);
+    CURSOR_POSITION_Y.store(y.to_bits(), std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Global queue for pending window status changes from ArkTS
 /// (`windowStatusChange` callbacks — maximize/minimize/fullscreen/floating).
 /// The runtime event loop drains this queue and feeds each (window_id, status)
@@ -1298,10 +1323,23 @@ mod tests {
     }
 
     #[test]
+    fn update_cursor_position_stores_vp_coordinates() {
+        use std::sync::atomic::Ordering;
+        update_cursor_position(10.5, 20.25);
+        assert_eq!(
+            f64::from_bits(CURSOR_POSITION_X.load(Ordering::Relaxed)),
+            10.5
+        );
+        assert_eq!(
+            f64::from_bits(CURSOR_POSITION_Y.load(Ordering::Relaxed)),
+            20.25
+        );
+    }
+
+    #[test]
     fn decor_change_callbacks_fire_only_on_real_changes() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::{Arc, Mutex};
-
         let mut inner = OpenHarmonyAppInner::new();
         inner.claim_render_owner("owner").unwrap();
         inner.window_rects.insert(

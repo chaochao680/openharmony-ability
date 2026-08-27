@@ -572,16 +572,15 @@ export class WindowPlugin extends AsyncPluginBase {
 
     if (action === "set-fullscreen") {
       const request = parseFullscreenRequest(payload);
-      const win = this.requireWindow(request.windowId, context);
-      try {
-        // Immersive fullscreen: expand layout into system-bar regions and hide
-        // both bars. `on=false` reverses — restore layout and re-show bars.
-        await win.setWindowLayoutFullScreen(request.on);
-        await win.setWindowSystemBarEnable(request.on ? [] : ["status", "navigation"]);
-        return { typeName: ACKNOWLEDGEMENT_TYPE, value: new WindowAcknowledgement(true) };
-      } catch (error) {
-        throw new Error(`set-fullscreen failed: ${String(error)}`);
-      }
+      // Delegate to WindowManager.setFullscreen: dual-path by form factor —
+      // desktop/2in1 uses maximize(ENTER_IMMERSIVE) + setTitleAndDockHoverShown,
+      // mobile uses setWindowLayoutFullScreen + setWindowSystemBarEnable, with
+      // per-window serialization (rapid on/off races). The inline
+      // setWindowLayoutFullScreen calls below were the pluginize-era migration
+      // of the legacy NAPI path and only implemented the mobile path — a silent
+      // visual no-op on desktop (ack OK, no window change).
+      WindowManager.getInstance().setFullscreen(request.windowId, request.on);
+      return { typeName: ACKNOWLEDGEMENT_TYPE, value: new WindowAcknowledgement(true) };
     }
 
     if (action === "set-background-color") {
