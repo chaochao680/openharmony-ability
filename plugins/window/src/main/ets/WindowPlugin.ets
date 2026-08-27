@@ -878,11 +878,22 @@ export class WindowPlugin extends AsyncPluginBase {
         // Use FOLLOW_APP_IMMERSIVE_SETTING (not the default ENTER_IMMERSIVE) to
         // preserve the existing fullscreen layout mode. ENTER_IMMERSIVE causes a
         // layout gap (white bar at bottom) after recover().
+        // Snapshot the floating rect first: WMS recover() re-anchors the floating
+        // position to the pointer (GetFullScreenToFloatingRect), so the paired
+        // recover below must moveTo() back — see WindowManager.preMaximizeRects.
+        // Cannot delegate to WindowManager.maximizeWindow (fire-and-forget) without
+        // losing this bridge's await-completion semantics (callers immediately
+        // query is-maximized afterwards).
+        WindowManager.getInstance().snapshotPreMaximizeRect(request.windowId, win);
         await win.maximize(window.MaximizePresentation.FOLLOW_APP_IMMERSIVE_SETTING);
       } else if (action === "restore") {
         await (dynamic.restore() as Promise<void>);
       } else if (action === "recover") {
         await (dynamic.recover() as Promise<void>);
+        // Restore the pre-maximize position snapshotted above (WMS recover()
+        // pointer-anchors the floating rect). Best-effort — recover already
+        // succeeded.
+        await WindowManager.getInstance().restorePreMaximizeRect(request.windowId, win);
         // NOTE: Do NOT call showWindow() after recover() — recover() already makes
         // the window visible, and showWindow() resets the window position to centered
         // state, causing the window to jump to the center of the screen.

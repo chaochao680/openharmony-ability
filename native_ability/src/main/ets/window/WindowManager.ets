@@ -100,6 +100,16 @@ export class WindowManager {
   // Each window gets its own Promise chain; new ops are appended via .then().
   private windowOpQueues: Map<number, Promise<void>> = new Map();
 
+  // preMaximizeRects: floating rect captured right before maximize(). WMS recover()
+  // re-computes the floating position via GetFullScreenToFloatingRect (pointer-anchored —
+  // designed for drag-off-titlebar unmaximize), so a programmatic recover() lands the
+  // window near the cursor (top-right when triggered from the ❐ title-bar button) instead
+  // of the pre-maximize position. recoverWindow() moveTo()s back to the saved rect.
+  // has()-guarded on save: a second maximize while already maximized keeps the FIRST
+  // floating rect (the current rect would be the maximized one). Cleared on use and in
+  // removeWindow.
+  private preMaximizeRects: Map<number, window.Rect> = new Map();
+
   // Track the last focused window via WINDOW_ACTIVE (kept for backward compat / debugging)
   private lastFocusedWindow: window.Window | null = null;
   private lastFocusedWindowId: number = -1;
@@ -542,6 +552,35 @@ export class WindowManager {
     });
   }
 
+  // --- pre-maximize rect snapshot helpers (shared with WindowPlugin's tao bridge path) ---
+  // WMS recover() re-anchors the floating rect to the pointer (GetFullScreenToFloatingRect);
+  // these snapshot/restore the pre-maximize position so any maximize→recover pair —
+  // FloatPage title-bar buttons OR the tao set_maximized bridge (WindowPlugin.windowCommand,
+  // which cannot delegate to maximizeWindow/recoverWindow without losing its await
+  // completion semantics) — lands back where it started.
+  snapshotPreMaximizeRect(windowId: number, win: window.Window): void {
+    const wid = Number(windowId);
+    // has-guard: if already maximized, keep the first snapshot — the live rect
+    // would be the maximized fullscreen one.
+    if (!this.preMaximizeRects.has(wid)) {
+      this.preMaximizeRects.set(wid, win.getWindowProperties().windowRect);
+    }
+  }
+
+  async restorePreMaximizeRect(windowId: number, win: window.Window): Promise<void> {
+    const wid = Number(windowId);
+    const saved = this.preMaximizeRects.get(wid);
+    if (!saved) { return; }
+    this.preMaximizeRects.delete(wid);
+    try {
+      await win.moveTo(saved.left, saved.top);
+    } catch (err) {
+      // Position restore is best-effort: the caller's recover() already succeeded —
+      // a moveTo failure must not surface as a recover failure.
+      hilog.warn(DOMAIN, 'WindowManager', 'restorePreMaximizeRect %{public}d moveTo failed: %{public}s', wid, JSON.stringify(err));
+    }
+  }
+
   maximizeWindow(windowId: number): void {
     // 拦截:FLAG_MAXIMIZABLE 为 0 时,不允许最大化(问题四:语义错位修复)
     if (!this.getDecorationFlag(windowId, 'maximizable')) {
@@ -551,15 +590,17 @@ export class WindowManager {
     const win = this.getWindow(windowId);
     if (!win) { hilog.warn(DOMAIN, 'WindowManager', 'maximizeWindow: window %{public}d not found', windowId); return; }
     // Serialize: maximize can race with fullscreen-exit (recover) or minimize.
-    this.serializeOp(windowId, () =>
+    this.serializeOp(windowId, () => {
+      // Snapshot the floating rect BEFORE maximizing (see snapshotPreMaximizeRect).
+      this.snapshotPreMaximizeRect(windowId, win);
       // Use FOLLOW_APP_IMMERSIVE_SETTING (not ENTER_IMMERSIVE) to preserve the existing
       // fullscreen layout mode. ENTER_IMMERSIVE explicitly enters fullscreen on maximize and
       // exits it on recover, causing a layout gap (white bar at bottom where navigation bar was).
       // FOLLOW_APP_IMMERSIVE_SETTING preserves setWindowLayoutFullScreen(true) set at init.
-      win.maximize(window.MaximizePresentation.FOLLOW_APP_IMMERSIVE_SETTING).then(() => {
+      return win.maximize(window.MaximizePresentation.FOLLOW_APP_IMMERSIVE_SETTING).then(() => {
         hilog.info(DOMAIN, 'WindowManager', 'maximizeWindow %{public}d OK', windowId);
-      })
-    );
+      });
+    });
   }
 
   setWindowTopmost(windowId: number, topmost: boolean): void {
@@ -646,8 +687,20 @@ export class WindowManager {
     this.serializeOp(windowId, () =>
       // FOLLOW_APP_IMMERSIVE_SETTING preserves the existing fullscreen layout,
       // so no setWindowLayoutFullScreen(true) needed after recover.
-      win.recover().then(() => {
-        hilog.info(DOMAIN, 'WindowManager', 'recoverWindow %{public}d OK', windowId);
+      win.recover().then(async () => {
+        // recover() positions the restored floating window via WMS
+        // GetFullScreenToFloatingRect — pointer-anchored, designed for drag-off-
+        // titlebar unmaximize — NOT the pre-maximize rect (device-verified: a
+        // window created at [0,0] came back at [1913,0], i.e. under the cursor /
+        // top-right where the ❐ button was clicked). moveTo() the rect snapshotted
+        // in maximizeWindow() to restore the original position. Size is NOT
+        // re-applied: GetFullScreenToFloatingRect preserves the floating w/h.
+        if (this.preMaximizeRects.has(Number(windowId))) {
+          await this.restorePreMaximizeRect(windowId, win);
+          hilog.info(DOMAIN, 'WindowManager', 'recoverWindow %{public}d OK (restored pre-maximize rect)', windowId);
+        } else {
+          hilog.info(DOMAIN, 'WindowManager', 'recoverWindow %{public}d OK (no pre-maximize rect; WMS default position)', windowId);
+        }
       })
     );
   }
@@ -1702,6 +1755,7 @@ export class WindowManager {
     this.pendingInits.delete(windowId);
     this.pendingBlurs.delete(windowId);
     this.windowOpQueues.delete(windowId);
+    this.preMaximizeRects.delete(windowId);
     // Clear per-window accelerator flags (clipboard / zoom-hotkey intercepts).
     // These are keyed by windowId and set in ArkHelper.createWebview; without
     // clearing here they leak past window destruction. removeWindow is the

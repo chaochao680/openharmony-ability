@@ -302,6 +302,17 @@ struct FloatPage {
             // duplication given Float dragging targets API14+ desktop.
             .onTouch((event: TouchEvent) => {
               if (event.type === TouchType.Down) {
+                // While maximized, startMoving() at touch-DOWN triggers WMS
+                // drag-off-maximize immediately (GetFullScreenToFloatingRect,
+                // pointer-anchored): the window jumps away before touch-UP, the
+                // UP lands out of region, and the ❐/—/✕ button click gesture is
+                // rejected — onClick never fires (device-verified 2026-08-27:
+                // "MOVE/UP event is out of region, try to reject click gesture").
+                // Drag while maximized is sacrificed; restore via the ❐ button
+                // (recoverWindow restores the pre-maximize rect).
+                if (this.isMaximized) {
+                  return;
+                }
                 if (deviceInfo.sdkApiVersion < 14) {
                   return;
                 }
