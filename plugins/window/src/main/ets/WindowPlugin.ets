@@ -37,6 +37,7 @@ const LIMITS_REQUEST_TYPE = "ohos.window.LimitsRequest";
 const IME_POSITION_REQUEST_TYPE = "ohos.window.ImePositionRequest";
 const DRAGGABLE_REQUEST_TYPE = "ohos.window.DraggableRequest";
 const CURSOR_ICON_REQUEST_TYPE = "ohos.window.CursorIconRequest";
+const CURSOR_VISIBLE_REQUEST_TYPE = "ohos.window.CursorVisibleRequest";
 const DECORATION_FLAGS_REQUEST_TYPE = "ohos.window.DecorationFlagsRequest";
 const ACKNOWLEDGEMENT_TYPE = "ohos.window.Acknowledgement";
 const STATE_RESPONSE_TYPE = "ohos.window.StateResponse";
@@ -150,6 +151,11 @@ interface WindowDraggableRequest {
 interface CursorIconRequest {
   windowId: number;
   style: number;
+}
+
+interface CursorVisibleRequest {
+  /** Global pointer visibility — no windowId (pointer.setPointerVisible is process-wide). */
+  visible: boolean;
 }
 
 interface DecorationFlagsRequest {
@@ -473,6 +479,17 @@ function parseCursorIconRequest(payload: BridgeTypedValue): CursorIconRequest {
   const request = payload.value as CursorIconRequest;
   if (!isWindowId(request?.windowId) || !isSafeInteger(request?.style)) {
     throw new Error("set-cursor-icon requires a valid windowId and integer style");
+  }
+  return request;
+}
+
+function parseCursorVisibleRequest(payload: BridgeTypedValue): CursorVisibleRequest {
+  if (payload.typeName !== CURSOR_VISIBLE_REQUEST_TYPE || typeof payload.value !== "object") {
+    throw new Error(`ohos.window.set-cursor-visible requires bridge type ${CURSOR_VISIBLE_REQUEST_TYPE}`);
+  }
+  const request = payload.value as CursorVisibleRequest;
+  if (typeof request?.visible !== "boolean") {
+    throw new Error("set-cursor-visible requires a boolean visible");
   }
   return request;
 }
@@ -820,6 +837,16 @@ export class WindowPlugin extends AsyncPluginBase {
       // setter).
       const request = parseCursorIconRequest(payload);
       WindowManager.getInstance().setPointerStyle(request.windowId, request.style);
+      return { typeName: ACKNOWLEDGEMENT_TYPE, value: new WindowAcknowledgement(true) };
+    }
+
+    if (action === "set-cursor-visible") {
+      // Delegates to WindowManager.setPointerVisible (pointer.setPointerVisible).
+      // GLOBAL visibility — OHOS has no per-window variant, so this request
+      // carries no windowId (multi-window caveat documented as 遗留问题六).
+      // Fire-and-forget: failures are logged in WindowManager.
+      const request = parseCursorVisibleRequest(payload);
+      WindowManager.getInstance().setPointerVisible(request.visible);
       return { typeName: ACKNOWLEDGEMENT_TYPE, value: new WindowAcknowledgement(true) };
     }
 

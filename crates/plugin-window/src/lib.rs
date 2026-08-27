@@ -273,6 +273,16 @@ impl_bridge_napi_type!(CursorIconRequest, "ohos.window.CursorIconRequest");
 
 #[napi(object)]
 #[derive(Clone, Debug)]
+pub struct CursorVisibleRequest {
+    /// Global pointer visibility. `pointer.setPointerVisible` is process-wide
+    /// (not per-window), so this request deliberately carries no window id.
+    pub visible: bool,
+}
+
+impl_bridge_napi_type!(CursorVisibleRequest, "ohos.window.CursorVisibleRequest");
+
+#[napi(object)]
+#[derive(Clone, Debug)]
 pub struct DecorationFlagsRequest {
     pub window_id: i64,
     /// FLAG bit-field (closable=1, maximizable=2, minimizable=4, resizable=8).
@@ -664,6 +674,20 @@ impl WindowClient {
         self.call::<CursorIconRequest, WindowAcknowledgement>(
             "set-cursor-icon",
             CursorIconRequest { window_id, style },
+        )
+        .await?
+        .ensure()
+    }
+
+    /// Sets the GLOBAL pointer visibility (pointer.setPointerVisible — there
+    /// is no per-window variant on OHOS). Restores the dispatch that the
+    /// bridge facade migration (tao 73212e1e) dropped to a no-op, breaking
+    /// `set_cursor_visible` on the Rust side even though the ArkTS
+    /// WindowManager.setPointerVisible implementation survived.
+    pub async fn set_cursor_visible(&self, visible: bool) -> Result<()> {
+        self.call::<CursorVisibleRequest, WindowAcknowledgement>(
+            "set-cursor-visible",
+            CursorVisibleRequest { visible },
         )
         .await?
         .ensure()
