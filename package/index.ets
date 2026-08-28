@@ -71,6 +71,15 @@ export {
 } from "./src/main/ets/helper/StatusBarUtils";
 export type { StatusBarIconRgba } from "./src/main/ets/ability/type";
 
+// ─── Key synthesis helpers (exported for WebviewPlugin.ets bridge plugin) ────
+// ohos-webview-key-synthesis: synthetic DOM KeyboardEvents for the webview
+// (ArkWeb's native key events are degenerate — see helper for details).
+export {
+  notifyKeySynthesisController,
+  synthesizeDomKeyEvent,
+  KEY_SYNTHESIS_SHIM,
+} from "./src/main/ets/helper/key_synthesis";
+
 // === Bridge plugins (aggregated from plugins/ - see pack-plugins.ps1) ===
 export { AppControlPlugin } from "./src/main/ets/plugins/app-control/AppControlPlugin";
 export { AccountPlugin } from "./src/main/ets/plugins/account/AccountPlugin";

@@ -19,6 +19,8 @@ import {
   BridgeLifecycleEvent,
   WindowManager,
   notifyPrimaryWebviewController,
+  notifyKeySynthesisController,
+  KEY_SYNTHESIS_SHIM,
 } from "@ohos-rs/ability";
 
 const CREATE_REQUEST_TYPE = "ohos.webview.CreateRequest";
@@ -1301,7 +1303,7 @@ function BuildWebview(data: ManagedWebview) {
         .javaScriptAccess(data.javascriptEnabled ?? true)
         .domStorageAccess(true)
         .mediaPlayGestureAccess(data.autoplay === true ? false : true)
-        .javaScriptOnDocumentStart(data.initializationScripts ?? [])
+        .javaScriptOnDocumentStart(keySynthesisScripts(data))
         .multiWindowAccess(data.eventOptions.newWindow === true)
         .allowWindowOpenMethod(data.eventOptions.newWindow === true)
         .onControllerAttached(() => {
@@ -1423,7 +1425,7 @@ function BuildWebview(data: ManagedWebview) {
       .javaScriptAccess(data.javascriptEnabled ?? true)
         .domStorageAccess(true)
       .mediaPlayGestureAccess(data.autoplay === true ? false : true)
-      .javaScriptOnDocumentStart(data.initializationScripts ?? [])
+      .javaScriptOnDocumentStart(keySynthesisScripts(data))
       .multiWindowAccess(data.eventOptions.newWindow === true)
       .allowWindowOpenMethod(data.eventOptions.newWindow === true)
       .onControllerAttached(() => {
@@ -1493,6 +1495,41 @@ function BuildWebview(data: ManagedWebview) {
   }
 }
 
+/**
+ * Document-start scripts with the key-synthesis shim appended (main window
+ * only). The shim suppresses ArkWeb's degenerate native keydown/keyup events
+ * so pages see only the synthetic stream from MainPage.onKeyPreIme (see
+ * native_ability helper/key_synthesis.ets, openspec ohos-webview-key-synthesis).
+ *
+ * Sub-window (Float) webviews are excluded: they have no key-synthesis wiring
+ * (their onKeyPreIme serves other interception purposes, see FloatPage), so
+ * suppressing their native key events without synthetic replacement would
+ * drop ALL key events there.
+ */
+function keySynthesisScripts(data: ManagedWebview): WebviewInitializationScript[] {
+  const wid = data.windowId ?? 0;
+  const base = data.initializationScripts ?? [];
+  if (wid !== 0) {
+    return base;
+  }
+  // scriptRules are ArkWeb URL match patterns — an EMPTY array matches no
+  // document (the shim silently never runs; observed 2026-08-28 as unsuppressed
+  // native key events). "*" alone does not match custom protocols
+  // (tauri://localhost), so reuse the UNION of the app's own init-script
+  // rules — the shim must run exactly wherever those run. No init scripts → "*".
+  const rules: Set<string> = new Set();
+  for (const item of base) {
+    for (const rule of item.scriptRules) {
+      rules.add(rule);
+    }
+  }
+  if (rules.size === 0) {
+    rules.add('*');
+  }
+  const shim: WebviewInitializationScript = { script: KEY_SYNTHESIS_SHIM, scriptRules: Array.from(rules) };
+  return base.concat([shim]);
+}
+
 function handleControllerAttached(data: ManagedWebview): void {
   if (!data.beginControllerAttach()) {
     return;
@@ -1525,6 +1562,11 @@ function handleControllerAttached(data: ManagedWebview): void {
     if (wid > 0) {
       WindowManager.getInstance().registerWebviewController(wid, data.controller as webview.WebviewController);
     }
+
+    // ohos-webview-key-synthesis: register the controller (ALL windows incl.
+    // main — unlike the sub-window-only WindowManager map above) so
+    // MainPage.onKeyPreIme can dispatch synthetic DOM key events into it.
+    notifyKeySynthesisController(wid, data.controller as webview.WebviewController);
 
     data.didInitialLoad = true;
     if (data.url) {
