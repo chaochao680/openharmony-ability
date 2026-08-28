@@ -1,6 +1,8 @@
 import { WebHeader } from "@kit.ArkUI";
 import { BuilderNode } from "@ohos.arkui.node";
 import webview from "@ohos.web.webview";
+import { image } from "@kit.ImageKit";
+import { buffer } from "@kit.ArkTS";
 import { fileIo, fileUri } from "@kit.CoreFileKit";
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { BusinessError, print } from "@kit.BasicServicesKit";
@@ -42,8 +44,13 @@ const PRINT_STATE_EVENT_TYPE = "ohos.webview.PrintStateEvent";
 
 const PRINT_LOG_DOMAIN = 0x9801;
 const PRINT_LOG_TAG = "WebviewPrint";
+// Mirrors native_ability helper/constants.ets NATIVE_MODULE_STORAGE_KEY; not re-exported
+// through the @ohos-rs/ability barrel, so defined locally for the close-window path.
+const NATIVE_MODULE_STORAGE_KEY = '__native_module__';
 const SNAPSHOT_REQUEST_TYPE = "ohos.webview.SnapshotRequest";
 const SNAPSHOT_RESPONSE_TYPE = "ohos.webview.SnapshotResponse";
+const CAPTURE_RESPONSE_TYPE = "ohos.webview.CaptureResponse";
+const PICK_COLOR_RESPONSE_TYPE = "ohos.webview.PickColorResponse";
 const USER_AGENT_REQUEST_TYPE = "ohos.webview.UserAgentRequest";
 const DRAG_EVENT_TYPE = "ohos.webview.DragEvent";
 const DROP_EVENT_TYPE = "ohos.webview.DropEvent";
@@ -574,6 +581,32 @@ class WebviewSnapshotResponse {
   }
 }
 
+class WebviewCaptureResponse {
+  readonly pngBase64: string;
+  readonly width: number;
+  readonly height: number;
+
+  constructor(pngBase64: string, width: number, height: number) {
+    this.pngBase64 = pngBase64;
+    this.width = width;
+    this.height = height;
+  }
+}
+
+class WebviewPickColorResponse {
+  readonly r: number;
+  readonly g: number;
+  readonly b: number;
+  readonly a: number;
+
+  constructor(r: number, g: number, b: number, a: number) {
+    this.r = r;
+    this.g = g;
+    this.b = b;
+    this.a = a;
+  }
+}
+
 interface WebviewUserAgentRequest {
   id: string;
   userAgent: string;
@@ -981,19 +1014,44 @@ function handleHttpsIntercept(
   data: ManagedWebview,
   url: string,
 ): WebResourceResponse | null {
-  if (!url || !url.startsWith("https://")) return null;
+  if (!url || !url.startsWith("https://")) {
+    if (url) {
+      hilog.info(0x1999, 'WebviewSurface',
+        '[https-intercept] handleHttpsIntercept skip (not https): id=%{public}s url=%{public}s',
+        String(data.id), url);
+    }
+    return null;
+  }
   const protocols = data.httpsInterceptProtocols;
-  if (!protocols || protocols.size === 0) return null;
+  if (!protocols || protocols.size === 0) {
+    hilog.info(0x1999, 'WebviewSurface',
+      '[https-intercept] handleHttpsIntercept skip (no protocols): id=%{public}s url=%{public}s',
+      String(data.id), url);
+    return null;
+  }
   const rest = url.substring("https://".length);
   const dotIdx = rest.indexOf(".");
   if (dotIdx <= 0) return null;
   const protocol = rest.substring(0, dotIdx);
-  if (!protocols.has(protocol)) return null;
+  if (!protocols.has(protocol)) {
+    hilog.info(0x1999, 'WebviewSurface',
+      '[https-intercept] handleHttpsIntercept skip (protocol not in set): id=%{public}s url=%{public}s protocol=%{public}s',
+      String(data.id), url, protocol);
+    return null;
+  }
+  hilog.info(0x1999, 'WebviewSurface',
+    '[https-intercept] handleHttpsIntercept match: id=%{public}s url=%{public}s protocol=%{public}s — dispatching to bridge',
+    String(data.id), url, protocol);
   try {
     const response = data.onHttpsInterceptRequest(url);
+    hilog.info(0x1999, 'WebviewSurface',
+      '[https-intercept] handleHttpsIntercept result: id=%{public}s handled=%{public}s response_is_null=%{public}s',
+      String(data.id), response !== null ? 'true' : 'false', response === null ? 'true' : 'false');
     return response;
   } catch (error) {
-    console.error("WebView https-intercept failed: " + String(error));
+    hilog.error(0x1999, 'WebviewSurface',
+      '[https-intercept] handleHttpsIntercept exception: id=%{public}s url=%{public}s error=%{public}s',
+      String(data.id), url, String(error));
     return null;
   }
 }
@@ -1251,7 +1309,11 @@ function BuildWebview(data: ManagedWebview) {
         })
         .onLoadIntercept((event) => handleLoadIntercept(data, event.data.getRequestUrl()))
         .onInterceptRequest((event) => {
-          return handleHttpsIntercept(data, (event as WebInterceptRequestEvent).request.getRequestUrl());
+          const interceptUrl = (event as WebInterceptRequestEvent).request.getRequestUrl();
+          hilog.info(0x1999, 'WebviewSurface',
+            '[https-intercept] onInterceptRequest fired: id=%{public}s url=%{public}s protocols_size=%{public}d',
+            String(data.id), interceptUrl ?? 'null', data.httpsInterceptProtocols?.size ?? 0);
+          return handleHttpsIntercept(data, interceptUrl);
         })
         .onTitleReceive((event) => data.onTitleChange(event.title))
         .onPageBegin((e) => {
@@ -1369,7 +1431,11 @@ function BuildWebview(data: ManagedWebview) {
       })
       .onLoadIntercept((event) => handleLoadIntercept(data, event.data.getRequestUrl()))
       .onInterceptRequest((event) => {
-        return handleHttpsIntercept(data, (event as { request: WebResourceRequest }).request.getRequestUrl());
+        const interceptUrl = (event as { request: WebResourceRequest }).request.getRequestUrl();
+        hilog.info(0x1999, 'WebviewSurface',
+          '[https-intercept] onInterceptRequest(embedded) fired: id=%{public}s url=%{public}s protocols_size=%{public}d',
+          String(data.id), interceptUrl ?? 'null', data.httpsInterceptProtocols?.size ?? 0);
+        return handleHttpsIntercept(data, interceptUrl);
       })
       .onTitleReceive((event) => data.onTitleChange(event.title))
       .onPageBegin((e) => {
@@ -1462,8 +1528,14 @@ function handleControllerAttached(data: ManagedWebview): void {
 
     data.didInitialLoad = true;
     if (data.url) {
+      hilog.info(0x1999, 'WebviewSurface',
+        '[https-intercept] handleControllerAttached loadUrl: id=%{public}s url=%{public}s protocols_size=%{public}d',
+        String(data.id), data.url, data.httpsInterceptProtocols?.size ?? 0);
       data.controller.loadUrl(data.url, headersOf(data.headers));
     } else {
+      hilog.info(0x1999, 'WebviewSurface',
+        '[https-intercept] handleControllerAttached loadData (no url): id=%{public}s',
+        String(data.id));
       data.controller.loadData(data.html!, "text/html", "UTF-8", " ", " ");
     }
     data.markControllerReady();
@@ -1553,6 +1625,9 @@ class WebviewSurface {
       httpsInterceptProtocols: new Set<string>(payload.httpsInterceptProtocolList ?? []),
       resizeDebounceTimer: 0,
       onHttpsInterceptRequest: (url: string): WebResourceResponse | null => {
+        hilog.info(0x1999, 'WebviewSurface',
+          '[https-intercept] onHttpsInterceptRequest enter: id=%{public}s nativeTag=%{public}s url=%{public}s',
+          payload.id, nativeTag, url);
         try {
           const response = this.pluginContext.invokeNativeSync(
             "https-intercept",
@@ -1560,11 +1635,20 @@ class WebviewSurface {
             HTTPS_INTERCEPT_RESPONSE_TYPE,
             new WebviewHttpsInterceptRequestPayload(payload.id, nativeTag, url) as ESObject,
           ) as WebviewHttpsInterceptResponse;
+          hilog.info(0x1999, 'WebviewSurface',
+            '[https-intercept] onHttpsInterceptRequest bridge returned: id=%{public}s handled=%{public}s status=%{public}d body_len=%{public}d',
+            payload.id,
+            response?.handled === true ? 'true' : 'false',
+            response?.status ?? 0,
+            response?.body?.length ?? 0);
           if (
             response === null ||
             typeof response !== "object" ||
             response.handled !== true
           ) {
+            hilog.warn(0x1999, 'WebviewSurface',
+              '[https-intercept] onHttpsInterceptRequest returning null (handled=false or invalid response): id=%{public}s url=%{public}s',
+              payload.id, url);
             return null;
           }
           const webResponse = new WebResourceResponse();
@@ -1573,9 +1657,14 @@ class WebviewSurface {
           webResponse.setResponseMimeType(response.mimeType || "application/octet-stream");
           webResponse.setResponseCode(response.status || 200);
           webResponse.setResponseIsReady(true);
+          hilog.info(0x1999, 'WebviewSurface',
+            '[https-intercept] onHttpsInterceptRequest returning WebResourceResponse: id=%{public}s status=%{public}d mime=%{public}s',
+            payload.id, response.status || 200, response.mimeType || "application/octet-stream");
           return webResponse;
         } catch (error) {
-          console.error("WebView https-intercept dispatch failed: " + String(error));
+          hilog.error(0x1999, 'WebviewSurface',
+            '[https-intercept] onHttpsInterceptRequest exception: id=%{public}s url=%{public}s error=%{public}s',
+            payload.id, url, String(error));
           return null;
         }
       },
@@ -1767,10 +1856,21 @@ class WebviewSurface {
     const node = new BuilderNode<[ManagedWebview]>(builderUiCtx);
     const entry = new WebviewEntry(data, node);
     // Wire up close-window callback: when the webview navigates to close-window.invalid,
-    // destroy the Float sub-window via WindowManager.
+    // destroy the Float sub-window via WindowManager. Notify Rust FIRST (mirrors menu.ets
+    // closeWindow and FloatPage × button) so the tauri manager drains PENDING_WINDOW_CLOSES
+    // and removes its registry entry — otherwise getByLabel returns a zombie handle and the
+    // same-label window can never be rebuilt (manual_tests §二十八 close lifecycle defect).
     if (windowId > 0) {
       data.onCloseWindow = (): void => {
         hilog.info(0x1999, 'WebviewSurface', 'onCloseWindow: destroying windowId=%{public}d', windowId);
+        try {
+          const nativeModule: ESObject = AppStorage.get<ESObject>(NATIVE_MODULE_STORAGE_KEY);
+          if (nativeModule && typeof nativeModule.notifyWindowClose === 'function') {
+            nativeModule.notifyWindowClose(windowId);
+          }
+        } catch (e) {
+          hilog.warn(0x1999, 'WebviewSurface', 'onCloseWindow notifyWindowClose failed: %{public}s', String(e));
+        }
         WindowManager.getInstance().destroyWindow(windowId);
       };
     }
@@ -2035,10 +2135,105 @@ class WebviewSurface {
   ): Promise<WebviewSnapshotResponse> {
     const entry = await this.controllerEntry(id, callContext);
     const controller = entry.data.controller;
+    const pixelMap = await this.snapshotPixelMap(controller);
+    try {
+      const info = pixelMap.getImageInfoSync();
+      const byteCount = pixelMap.getPixelBytesNumber();
+      // Only return dimensions + byte count — transferring the full RGBA
+      // buffer across NAPI would be extremely slow (1.9MB for 800×600).
+      return new WebviewSnapshotResponse(true, info.size.width, info.size.height, byteCount);
+    } catch (e) {
+      throw new Error(`PixelMap info failed: ${String(e)}`);
+    } finally {
+      this.releasePixelMap(pixelMap);
+    }
+  }
 
-    // Wrap the callback-based webPageSnapshot API in a Promise with retries + timeout.
-    // Ported from legacy DefaultWebview.ets webPageSnapshot implementation.
-    const snapshotPromise = new Promise<WebviewSnapshotResponse>((resolve, reject) => {
+  async captureWebview(
+    id: string,
+    callContext: BridgeCallContext,
+  ): Promise<WebviewCaptureResponse> {
+    const entry = await this.controllerEntry(id, callContext);
+    const controller = entry.data.controller;
+    const pixelMap = await this.snapshotPixelMap(controller);
+    try {
+      const info = pixelMap.getImageInfoSync();
+      const packer = image.createImagePacker();
+      try {
+        // quality is REQUIRED by PackingOption in the API 12 typings even for PNG.
+        const packOptions: image.PackingOption = { format: "image/png", quality: 100 };
+        const arrayBuffer = await packer.packing(pixelMap, packOptions);
+        if (!arrayBuffer || arrayBuffer.byteLength === 0) {
+          throw new Error("ImagePacker produced empty PNG buffer");
+        }
+        // base64 (not raw bytes) — a Vec<u8> in a napi object would cross the bridge as
+        // Array<number>, inflating a multi-hundred-KB PNG ~8x in memory.
+        const pngBase64 = buffer.from(arrayBuffer).toString("base64");
+        return new WebviewCaptureResponse(pngBase64, info.size.width, info.size.height);
+      } finally {
+        try {
+          packer.release();
+        } catch (_packerErr) {
+          // best-effort release
+        }
+      }
+    } catch (e) {
+      throw new Error(`capture-webview failed: ${String(e)}`);
+    } finally {
+      this.releasePixelMap(pixelMap);
+    }
+  }
+
+  async pickColor(
+    id: string,
+    x: number,
+    y: number,
+    callContext: BridgeCallContext,
+  ): Promise<WebviewPickColorResponse> {
+    const entry = await this.controllerEntry(id, callContext);
+    const controller = entry.data.controller;
+    const pixelMap = await this.snapshotPixelMap(controller);
+    try {
+      const info = pixelMap.getImageInfoSync();
+      if (x < 0 || y < 0 || x >= info.size.width || y >= info.size.height) {
+        throw new Error(
+          `pick-color coordinates (${x}, ${y}) out of captured bounds ` +
+            `${info.size.width}x${info.size.height}`
+        );
+      }
+      // readPixels always writes BGRA_8888 bytes regardless of the PixelMap's own format.
+      // The caller provides the destination buffer; readPixels writes into it and returns void.
+      const area: image.PositionArea = {
+        pixels: new ArrayBuffer(4),
+        offset: 0,
+        stride: 4,
+        region: { x, y, size: { width: 1, height: 1 } },
+      };
+      await pixelMap.readPixels(area);
+      const bgra = new Uint8Array(area.pixels);
+      return new WebviewPickColorResponse(bgra[2], bgra[1], bgra[0], bgra[3]);
+    } catch (e) {
+      throw new Error(`pick-color failed: ${String(e)}`);
+    } finally {
+      this.releasePixelMap(pixelMap);
+    }
+  }
+
+  private releasePixelMap(pixelMap: image.PixelMap): void {
+    try {
+      pixelMap.release();
+    } catch (_releaseErr) {
+      // best-effort release
+    }
+  }
+
+  /**
+   * Wraps the callback-based webPageSnapshot API in a Promise with retries + timeout and
+   * resolves with the live PixelMap. The CALLER owns the PixelMap and must release() it
+   * after consuming it. Ported from the legacy DefaultWebview.ets implementation.
+   */
+  private snapshotPixelMap(controller: webview.WebviewController): Promise<image.PixelMap> {
+    const snapshotPromise = new Promise<image.PixelMap>((resolve, reject) => {
       let settled = false;
       const timeoutId = setTimeout(() => {
         if (!settled) {
@@ -2075,26 +2270,7 @@ class WebviewSurface {
                 done(() => reject(new Error("webPageSnapshot returned empty or failed result")));
                 return;
               }
-              const pixelMap = result.imagePixelMap;
-              try {
-                const info = pixelMap.getImageInfoSync();
-                const byteCount = pixelMap.getPixelBytesNumber();
-                // Only return dimensions + byte count — transferring the full RGBA
-                // buffer across NAPI would be extremely slow (1.9MB for 800×600).
-                done(() =>
-                  resolve(
-                    new WebviewSnapshotResponse(true, info.size.width, info.size.height, byteCount)
-                  )
-                );
-              } catch (e) {
-                done(() => reject(new Error(`PixelMap info failed: ${String(e)}`)));
-              } finally {
-                try {
-                  pixelMap.release();
-                } catch (_releaseErr) {
-                  // best-effort release
-                }
-              }
+              done(() => resolve(result.imagePixelMap));
             }
           );
         } catch (e) {
@@ -2169,9 +2345,17 @@ class WebviewSurface {
   }
 
   async printPdf(id: string, path: string, callContext: BridgeCallContext): Promise<boolean> {
+    // The temp PDF at `path` is created by the caller (wry create_pdf) before this runs.
+    // Clean it up on every exit path so it doesn't leak in the sandbox cache (mirrors
+    // DefaultWebview.ets printPage cleanup). 'succeed' delays deletion because the
+    // spooler reads the file asynchronously after the dialog resolves.
+    const cleanup = (): void => {
+      try { fileIo.unlinkSync(path); } catch (_e) { /* temp PDF cleanup; ignore if already gone */ }
+    };
     const ctx = callContext.abilityContext;
     if (!ctx) {
       hilog.error(PRINT_LOG_DOMAIN, PRINT_LOG_TAG, "printPdf: abilityContext missing");
+      cleanup();
       return false;
     }
     try {
@@ -2183,6 +2367,7 @@ class WebviewSurface {
         && permResult.authResults[0] === 0;
       if (!granted) {
         hilog.warn(PRINT_LOG_DOMAIN, PRINT_LOG_TAG, "printPdf: PRINT permission denied");
+        cleanup();
         return false;
       }
 
@@ -2190,6 +2375,7 @@ class WebviewSurface {
       const fileUriStr = fileUri.getUriFromPath(path);
       if (!fileUriStr) {
         hilog.error(PRINT_LOG_DOMAIN, PRINT_LOG_TAG, "printPdf: getUriFromPath returned empty for %{public}s", path);
+        cleanup();
         return false;
       }
 
@@ -2200,6 +2386,7 @@ class WebviewSurface {
       const task = await print.print([fileUriStr], ctx) as ESObject;
       if (!task) {
         hilog.error(PRINT_LOG_DOMAIN, PRINT_LOG_TAG, "printPdf: print() returned no PrintTask");
+        cleanup();
         return false;
       }
 
@@ -2218,6 +2405,9 @@ class WebviewSurface {
           hilog.info(PRINT_LOG_DOMAIN, PRINT_LOG_TAG, "PrintTask 'succeed': job submitted");
           notifyPrintState(this.pluginContext, id, "succeed");
           activePrintTasks.delete(id);
+          // The spooler reads the temp PDF asynchronously after job submission; deleting
+          // immediately would abort the print. Delay cleanup so the file survives the read.
+          setTimeout(cleanup, 10000);
         }); } catch (e) {
           hilog.warn(PRINT_LOG_DOMAIN, PRINT_LOG_TAG, "PrintTask 'succeed' registration failed: %{public}s", String(e));
         }
@@ -2225,6 +2415,7 @@ class WebviewSurface {
           hilog.error(PRINT_LOG_DOMAIN, PRINT_LOG_TAG, "PrintTask 'fail': %{public}s", String(err?.message ?? err));
           notifyPrintState(this.pluginContext, id, "fail", String(err?.message ?? err) || undefined);
           activePrintTasks.delete(id);
+          cleanup();
         }); } catch (e) {
           hilog.warn(PRINT_LOG_DOMAIN, PRINT_LOG_TAG, "PrintTask 'fail' registration failed: %{public}s", String(e));
         }
@@ -2232,6 +2423,7 @@ class WebviewSurface {
           hilog.info(PRINT_LOG_DOMAIN, PRINT_LOG_TAG, "PrintTask 'cancel': user cancelled");
           notifyPrintState(this.pluginContext, id, "cancel");
           activePrintTasks.delete(id);
+          cleanup();
         }); } catch (e) {
           hilog.warn(PRINT_LOG_DOMAIN, PRINT_LOG_TAG, "PrintTask 'cancel' registration failed: %{public}s", String(e));
         }
@@ -2248,10 +2440,16 @@ class WebviewSurface {
       }
 
       // 5) PrintTask obtained → framework will raise the dialog; no longer unconditionally true.
+      // Safety-net cleanup: terminal states (cancel/fail/succeed) should fire and clean up, but
+      // some dialog-dismiss paths on OHOS have been observed to not deliver any terminal event,
+      // leaking the temp PDF. A 120s unconditional cleanup guards against that without racing the
+      // spooler (succeed's 10s delay is shorter and runs first; idempotent unlink is safe twice).
+      setTimeout(cleanup, 120000);
       hilog.info(PRINT_LOG_DOMAIN, PRINT_LOG_TAG, "printPdf: PrintTask created, dialog pending");
       return true;
     } catch (error) {
       hilog.error(PRINT_LOG_DOMAIN, PRINT_LOG_TAG, "printPdf failed: %{public}s", String(error));
+      cleanup();
       return false;
     }
   }
@@ -2449,6 +2647,25 @@ export class WebviewPlugin extends AsyncPluginBase {
       return {
         typeName: STRING_RESPONSE_TYPE,
         value: new WebviewStringResponse(await surface.getUrl(controllerPayload.id, context)),
+      };
+    } else if (action === "capture-webview") {
+      return {
+        typeName: CAPTURE_RESPONSE_TYPE,
+        value: await surface.captureWebview(controllerPayload.id, context),
+      };
+    } else if (action === "pick-color") {
+      if (typeof controllerPayload.x !== "number" || typeof controllerPayload.y !== "number" ||
+          !Number.isInteger(controllerPayload.x) || !Number.isInteger(controllerPayload.y)) {
+        throw new Error("pick-color requires x and y as integers");
+      }
+      return {
+        typeName: PICK_COLOR_RESPONSE_TYPE,
+        value: await surface.pickColor(
+          controllerPayload.id,
+          controllerPayload.x,
+          controllerPayload.y,
+          context,
+        ),
       };
     } else if (action === "load-url") {
       await surface.loadUrl(

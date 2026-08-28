@@ -12,3 +12,4 @@ napi-derive-ohos = { workspace = true }
 http = { workspace = true }
 ohos-web-binding = { workspace = true }
 crossbeam-channel = { workspace = true }
+log = "0.4"

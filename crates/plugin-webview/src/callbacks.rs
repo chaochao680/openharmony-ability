@@ -333,7 +333,12 @@ pub(crate) fn download_start_decision(
 pub(crate) fn https_intercept_decision(
     request: WebviewHttpsInterceptRequest,
 ) -> Result<WebviewHttpsInterceptResponse> {
+    let req_id = request.id.clone();
     if !controller::is_current(&request.id, &request.native_tag)? {
+        log::warn!(
+            "[https-intercept] stale controller: id={} native_tag={}",
+            req_id, request.native_tag
+        );
         return Ok(WebviewHttpsInterceptResponse::passthrough());
     }
     let callback = CALLBACKS
@@ -344,7 +349,13 @@ pub(crate) fn https_intercept_decision(
         .cloned();
     Ok(callback
         .map(|callback| callback(request))
-        .unwrap_or_else(|| WebviewHttpsInterceptResponse::passthrough()))
+        .unwrap_or_else(|| {
+            log::warn!(
+                "[https-intercept] no callback registered for id={} — passthrough",
+                req_id
+            );
+            WebviewHttpsInterceptResponse::passthrough()
+        }))
 }
 
 pub(crate) fn dispatch_drag_enter(event: WebviewDragEvent) -> Result<()> {

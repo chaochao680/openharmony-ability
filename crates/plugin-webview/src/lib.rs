@@ -145,7 +145,16 @@ impl BridgePlugin for WebviewBridgePlugin {
             }
             "https-intercept" => {
                 let request = event.decode::<WebviewHttpsInterceptRequest>()?;
-                event.respond(callbacks::https_intercept_decision(request)?)
+                log::info!(
+                    "[bridge https-intercept] received: id={} native_tag={} url={}",
+                    request.id, request.native_tag, request.url
+                );
+                let result = callbacks::https_intercept_decision(request)?;
+                log::info!(
+                    "[bridge https-intercept] decision: handled={} status={}",
+                    result.handled, result.status
+                );
+                event.respond(result)
             }
             "download-end" => {
                 let notification = event.decode::<WebviewDownloadEndEvent>()?;
@@ -709,6 +718,36 @@ pub struct WebviewSnapshotResponse {
 }
 
 impl_bridge_napi_type!(WebviewSnapshotResponse, "ohos.webview.SnapshotResponse");
+
+// ── capture-webview / pick-color ────────────────────────────────────────────────
+
+/// Response for `capture-webview`: the full-page snapshot encoded as a base64 PNG string
+/// plus its pixel dimensions. base64 (not raw bytes) — a `Vec<u8>` in a napi object would
+/// serialize as `Array<number>`, inflating a multi-hundred-KB PNG ~8x in memory.
+/// Requests reuse [`WebviewControllerRequest`].
+#[napi(object)]
+#[derive(Clone, Debug)]
+pub struct WebviewCaptureResponse {
+    pub png_base64: String,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl_bridge_napi_type!(WebviewCaptureResponse, "ohos.webview.CaptureResponse");
+
+/// Response for `pick-color`: the pixel at snapshot coordinates (x, y). The ArkTS side
+/// reads a 1px region via `readPixels` (which always outputs BGRA_8888 bytes regardless
+/// of the PixelMap format) and converts the channels to RGBA before crossing the bridge.
+#[napi(object)]
+#[derive(Clone, Debug)]
+pub struct WebviewPickColorResponse {
+    pub r: u32,
+    pub g: u32,
+    pub b: u32,
+    pub a: u32,
+}
+
+impl_bridge_napi_type!(WebviewPickColorResponse, "ohos.webview.PickColorResponse");
 
 // ── set-cookie ──────────────────────────────────────────────────────────────────
 
@@ -1308,6 +1347,31 @@ impl WebviewHandle {
                 "WebView web-page-snapshot failed (page not loaded or snapshot error)",
             ))
         }
+    }
+
+    /// Captures the current page as a base64-encoded PNG image with its dimensions.
+    ///
+    /// The ArkTS side uses the same `webPageSnapshot` retry+timeout wrapper as
+    /// [`WebviewHandle::web_page_snapshot`], then packs the PixelMap as PNG via
+    /// `image.ImagePacker`. The PixelMap and ImagePacker are released on the ArkTS side.
+    pub async fn capture_webview(&self) -> Result<WebviewCaptureResponse> {
+        self.client
+            .call::<_, WebviewCaptureResponse>("capture-webview", self.controller_request())
+            .await
+    }
+
+    /// Reads the color of a single pixel at snapshot coordinates (x, y).
+    ///
+    /// Both coordinates are pixel offsets into the snapshot, i.e. the same coordinate
+    /// system as the width/height returned by [`WebviewHandle::capture_webview`].
+    /// Coordinates outside the snapshot surface reject with a structured error.
+    pub async fn pick_color(&self, x: u32, y: u32) -> Result<WebviewPickColorResponse> {
+        let mut request = self.controller_request();
+        request.x = Some(x as f64);
+        request.y = Some(y as f64);
+        self.client
+            .call::<_, WebviewPickColorResponse>("pick-color", request)
+            .await
     }
     ///
     /// OHOS recommends setting the user agent in `onControllerAttached`; runtime dynamic
