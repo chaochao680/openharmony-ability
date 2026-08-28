@@ -192,11 +192,20 @@ export class UrlPlugin extends AsyncPluginBase {
       // types and silently falls back to the notepad handler.
       // Sandbox/unmappable-prefix paths throw before startAbility, so they can
       // never fall through to a wrong handler.
+      //
+      // ⚠️ Want parameter placement (2026-08-28 device experiment): FM MainAbility
+      // reads the target from `want.parameters.fileUri` + `want.parameters.external_storage_uuid`,
+      // NOT from `want.uri` (top-level `uri` is ignored → FM defaults to home).
+      // `external_storage_uuid = "LOCAL"` is the local disk id (verified via FM
+      // diskNameArray; cloud = "cloud").
       const want: Want = {
         bundleName: "com.huawei.hmos.filemanager",
         abilityName: "MainAbility",
         moduleName: "pc",
-        uri: mapToVirtualUri(request.path),
+        parameters: {
+          fileUri: mapToVirtualUri(request.path),
+          external_storage_uuid: "LOCAL",
+        },
       };
       try {
         await context.abilityContext.startAbility(want);
