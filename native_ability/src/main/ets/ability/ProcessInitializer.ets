@@ -6,7 +6,7 @@ import { deviceInfo } from '@kit.BasicServicesKit';
 import { Module, AbilityInitContext } from "./type";
 import { Loadable } from "../helper/loadable";
 import { WindowManager } from "../window/WindowManager";
-import { DOMAIN } from '../helper/constants';
+import { DOMAIN, NATIVE_MODULE_STORAGE_KEY } from '../helper/constants';
 
 /**
  * ProcessInitializer — process-level initialization, executed only once.
@@ -112,6 +112,18 @@ export class ProcessInitializer {
 
     // module.init → bridge session creation is now performed by NativeAbility.onCreate,
     // which owns the per-Ability lifecycle and constructs BridgeHostRegistry sessions.
+
+    // Publish the primary native module to AppStorage so ArkUI components (FloatPage ×
+    // button / aboutToDisappear, menu.ets closeWindow, NativeAbility windowStatusChange)
+    // can call NAPI fns (notifyWindowClose / notifyWindowStatus). Without this, every
+    // AppStorage.get(NATIVE_MODULE_STORAGE_KEY) returns undefined → notifyWindowClose is
+    // never invoked → ArkTS destroys the Float window but the Rust tauri manager keeps a
+    // zombie entry → getByLabel returns a dead handle → same-label windows can't rebuild
+    // (manual_tests §二十八 close lifecycle defect).
+    if (this.nativeModules.length > 0) {
+      AppStorage.setOrCreate<ESObject>(NATIVE_MODULE_STORAGE_KEY, this.nativeModules[0] as ESObject);
+    }
+
     this.initialized = true;
     hilog.info(DOMAIN, 'ProcessInitializer', 'Process initialization complete');
   }
