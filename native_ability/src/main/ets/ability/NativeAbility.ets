@@ -524,13 +524,14 @@ export class NativeAbility extends UIAbility {
   // windowStage，否则窗口无内容 → SetUIContent timeout → 白屏（只剩 app 图标）。
   // 冷启动接续：windowStageActive=false（onCreate 不置位）→ 全量 setup；
   // 热启动接续：windowStageActive=true（原 onWindowStageCreate 已 setup）→ 跳过避免重复 load。
-  async onWindowStageRestore(windowStage: window.WindowStage, _want: Want, _launchParam: AbilityConstant.LaunchParam): Promise<void> {
+  // 签名必须与基类 UIAbility.onWindowStageRestore 一致：(windowStage) => void（无 want/launchParam，非 async）。
+  onWindowStageRestore(windowStage: window.WindowStage): void {
     if (this.windowStageActive) {
       hilog.info(DOMAIN, 'NativeAbility', 'onWindowStageRestore: stage already active (warm continuation), skipping full setup');
       return;
     }
     hilog.info(DOMAIN, 'NativeAbility', 'onWindowStageRestore: cold continuation, delegating to window-stage setup');
-    await this.onWindowStageCreate(windowStage);
+    void this.onWindowStageCreate(windowStage);
   }
 
   onWindowStageDestroy(): void | Promise<void> {
