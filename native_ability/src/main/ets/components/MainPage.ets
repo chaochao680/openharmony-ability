@@ -10,6 +10,7 @@ import {
 import { KeyCode } from "@kit.InputKit";
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { DOMAIN, MAIN_WINDOW_ID } from '../helper/constants';
+import { synthesizeDomKeyEvent } from '../helper/key_synthesis';
 import { WindowManager } from '../window/WindowManager';
 import { NativeModuleLoader } from "../runtime/NativeModuleLoader";
 import { invokeNativeBackPressInterceptor } from "../runtime/BackPress";
@@ -115,6 +116,21 @@ struct MainPage {
             recoverFn();
           }
           return true;
+        }
+        // ohos-webview-key-synthesis: forward unconsumed pre-IME key events to
+        // the DOM synthesizer (synthetic KeyboardEvents with key/code/repeat
+        // dispatched into the webview; ArkWeb's degenerate native key events
+        // are suppressed by the injected shim). Interceptor branches above
+        // return early, so consumed accelerators never reach the page.
+        //
+        // Main window only: the suppression shim is injected solely into the
+        // main window's webview (keySynthesisScripts, wid===0). Sub-UIAbility
+        // instances (id>0) load this same MainPage but get no shim, so feeding
+        // them the synthetic stream too would double key events (clean
+        // synthetic + unsuppressed degenerate native). They keep the
+        // pre-feature degradation, matching the ohos-platform-limitations spec.
+        if (this.windowId === MAIN_WINDOW_ID) {
+          synthesizeDomKeyEvent(event, this.windowId);
         }
         return false;
       })
