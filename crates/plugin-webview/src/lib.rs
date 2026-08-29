@@ -635,6 +635,26 @@ impl_bridge_napi_type!(
 
 // ── create-pdf ──────────────────────────────────────────────────────────────────
 
+/// Optional PDF generation configuration, mirroring `webview.PdfConfiguration`.
+/// Every field is optional — when `None`, the ArkTS side falls back to its
+/// defaults (A4 8.27×11.69in, zero margins, background printing on).
+#[napi(object)]
+#[derive(Clone, Debug, Default)]
+pub struct WebviewPdfConfig {
+    /// Page width in inches.
+    pub width: Option<f64>,
+    /// Page height in inches.
+    pub height: Option<f64>,
+    pub margin_top: Option<f64>,
+    pub margin_bottom: Option<f64>,
+    pub margin_left: Option<f64>,
+    pub margin_right: Option<f64>,
+    /// Page scale factor (e.g. 1.0).
+    pub scale: Option<f64>,
+    /// Whether to print background colors/images.
+    pub should_print_background: Option<bool>,
+}
+
 /// Request to generate a PDF file from the current WebView page.
 #[napi(object)]
 #[derive(Clone, Debug)]
@@ -642,6 +662,9 @@ pub struct WebviewPrintRequest {
     pub id: String,
     /// Target PDF file absolute path on the device filesystem.
     pub path: String,
+    /// Optional PDF layout configuration. When absent the ArkTS side uses
+    /// fixed A4 defaults; when present the provided values override per-field.
+    pub pdf_config: Option<WebviewPdfConfig>,
 }
 
 impl_bridge_napi_type!(WebviewPrintRequest, "ohos.webview.PrintRequest");
@@ -1273,6 +1296,7 @@ impl WebviewHandle {
                 WebviewPrintRequest {
                     id: self.id.clone(),
                     path: path.into(),
+                    pdf_config: None,
                 },
             )
             .await?
@@ -1300,11 +1324,16 @@ impl WebviewHandle {
 
     /// Generates a PDF from the currently loaded page and writes it to `path`.
     ///
-    /// Uses a fixed A4 configuration (8.27×11.69in, zero margins, shouldPrintBackground=true).
-    /// The ArkTS side guards `createPdf()` with an API 14+ version check; on older devices it
-    /// returns `success: false`. Callers should invoke this after `page-end` to ensure the page
-    /// is fully loaded.
-    pub async fn create_pdf(&self, path: impl Into<String>) -> Result<()> {
+    /// When `pdf_config` is provided, its values override the ArkTS-side defaults
+    /// (A4 8.27×11.69in, zero margins, background printing on) per-field.
+    /// The ArkTS side guards `createPdf()` with an API 14+ version check; on older
+    /// devices it returns `success: false`. Callers should invoke this after
+    /// `page-end` to ensure the page is fully loaded.
+    pub async fn create_pdf(
+        &self,
+        path: impl Into<String>,
+        pdf_config: Option<WebviewPdfConfig>,
+    ) -> Result<()> {
         let response = self
             .client
             .call::<_, WebviewPrintResponse>(
@@ -1312,6 +1341,7 @@ impl WebviewHandle {
                 WebviewPrintRequest {
                     id: self.id.clone(),
                     path: path.into(),
+                    pdf_config,
                 },
             )
             .await?;

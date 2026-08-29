@@ -33,9 +33,13 @@ const PUBLIC_BASE_PREFIXES: ReadonlyArray<string> = [
 ];
 
 // Real top-level directory name (lowercase) → file-manager virtual name.
-// Only "docs" (→ Documents) is empirically verified on 2in1 desktop (explicit
-// Want + screenshot address-bar check); the rest are inferred from the file
-// manager's internal constants and marked unverified for later validation.
+// All 6 virtual names verified on 2in1 desktop (2026-08-28 device experiment via
+// `aa start` + hilog setCurrentUri): FM accepts EXACTLY {Documents, Download,
+// Desktop, Images, Videos, Music} — a fixed internal set unrelated to the real
+// filesystem dir names. "Images" (not "Pictures") is the picture virtual name;
+// "Music" (not "Audio") is the audio virtual name. Real dirs with no matching
+// virtual name (Photo, Camera, Audios) fall through to the documented
+// "no mapping" error below (honest rejection, never a silent wrong-folder open).
 interface PublicDirEntry {
   realName: string;
   virtualName: string;
@@ -44,12 +48,18 @@ interface PublicDirEntry {
 
 const TOP_DIR_TO_VIRTUAL: ReadonlyArray<PublicDirEntry> = [
   { realName: "docs", virtualName: "Documents", verified: true },
-  { realName: "documents", virtualName: "Documents", verified: false },
-  { realName: "desktop", virtualName: "Desktop", verified: false },
-  { realName: "download", virtualName: "Download", verified: false },
-  { realName: "pictures", virtualName: "Images", verified: false },
-  { realName: "music", virtualName: "Music", verified: false },
-  { realName: "videos", virtualName: "Videos", verified: false },
+  // "documents" is not a real fs dir (real name is "Docs"), but a user may type
+  // it in the reveal path input; Documents is a valid virtual name, so accept it.
+  { realName: "documents", virtualName: "Documents", verified: true },
+  { realName: "desktop", virtualName: "Desktop", verified: true },
+  { realName: "download", virtualName: "Download", verified: true },
+  { realName: "pictures", virtualName: "Images", verified: true },
+  { realName: "music", virtualName: "Music", verified: true },
+  // Real "Audio"/"Audios" dirs map to the "Music" virtual name (Audio virtual
+  // name is rejected by FM; "Music" opens the 音频 folder which holds audio).
+  { realName: "audio", virtualName: "Music", verified: true },
+  { realName: "audios", virtualName: "Music", verified: true },
+  { realName: "videos", virtualName: "Videos", verified: true },
 ];
 
 // App-sandbox path markers: the file manager can never open these (platform

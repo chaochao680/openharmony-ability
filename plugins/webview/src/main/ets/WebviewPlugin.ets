@@ -194,12 +194,13 @@ interface ManagedWebview extends WebviewCreatePayload {
   onPageEnd: (url: string) => void;
   onNewWindow: (targetUrl: string, isAlert: boolean, isUserTrigger: boolean) => boolean;
   /**
-   * Best-effort popup shown after `onWindowNew` denied the ArkWeb popup
-   * (`setWebController(null)`) to avoid deadlocking the UI thread on an unhosted
-   * controller (#85). Cosmetic only — does not affect the `new-window-requested`
-   * event delivery. Defined in `create()` where `this.pluginContext.getUIContext()`
-   * is in scope (the `@Builder` hosting the `onWindowNew` closure is a free function
-   * with no `this`).
+   * In-page popup shown by the `.onWindowNew` Allow branch. ArkWeb's own popup is
+   * cancelled (`setWebController(null)`) to avoid deadlocking the UI thread on an
+   * unhosted controller (#85); this dialog's `Web` loads the target URL directly
+   * (NewWindowDialog builder `src=params.url`), giving the OHOS equivalent of
+   * "open in a new in-page window" (Allow). Defined in `create()` where
+   * `this.pluginContext.getUIContext()` is in scope (the `@Builder` hosting the
+   * `onWindowNew` closure is a free function with no `this`).
    */
   onShowNewWindow?: (controller: webview.WebviewController, url: string) => void;
   /** How this WebView was mounted: a parent-handle container or the component root. */
@@ -552,9 +553,21 @@ interface WebviewRegisterHttpsInterceptPayload {
   protocols: string[];
 }
 
+interface WebviewPdfConfig {
+  width?: number;
+  height?: number;
+  marginTop?: number;
+  marginBottom?: number;
+  marginLeft?: number;
+  marginRight?: number;
+  scale?: number;
+  shouldPrintBackground?: boolean;
+}
+
 interface WebviewPrintRequest {
   id: string;
   path: string;
+  pdfConfig?: WebviewPdfConfig | null;
 }
 
 class WebviewPrintResponse {
@@ -1341,27 +1354,26 @@ function BuildWebview(data: ManagedWebview) {
           if (!allow) {
             e.handler.setWebController(null);
           } else {
-            // #85: Allow at the embedding runtime level. `data.onNewWindow` above already did
-            // the synchronous `invokeNativeSync("new-window-request")` round-trip;
-            // Rust emits the `new-window-requested` event UNCONDITIONALLY
-            // (src-tauri/src/lib.rs, before the allow/deny branch), so by the time
-            // we reach here the event is already queued on the main-thread loop.
+            // Allow: the embedding runtime permits the new window. `data.onNewWindow`
+            // above already ran the synchronous `invokeNativeSync("new-window-request")`
+            // round-trip and Rust emitted the `new-window-requested` event
+            // unconditionally (src-tauri/src/lib.rs, before the allow/deny branch),
+            // so the event is already queued for JS.
             //
-            // We must NOT call `e.handler.setWebController(newController)` here:
-            // `newController` has no attached `Web` component host (ArkUI cannot
-            // build+attach a `Web` synchronously from this free-function callback),
-            // and `setWebController` on an unhosted controller PERMANENTLY BLOCKS
-            // the UI thread → the queued event never delivers → the suite hangs.
-            //
-            // Fix: deny the ArkWeb popup (`setWebController(null)` — non-blocking
-            // cancel, same path the Deny/CREATE branches use) so the main thread is
-            // freed and the queued `new-window-requested` event delivers to JS.
-            // The auto test only asserts event delivery, not a popup. We do NOT
-            // show the NewWindowDialog here: it is a 90%×80% overlay whose `Web`
-            // loads src:'' (blank), which would cover the main webview and hide the
-            // app's actual content. The manual dialog tests (category:'manual')
-            // are skipped in the auto suite, so no popup is needed here.
+            // We cancel ArkWeb's own popup via `setWebController(null)` (non-blocking;
+            // `setWebController` on an unhosted controller would permanently block the
+            // UI thread) and instead show an in-page NewWindowDialog whose `Web` loads
+            // the target URL directly — the OHOS equivalent of "open in a new in-page
+            // window" (Allow). The dialog's controller is independent of `e.handler`,
+            // so there is no deadlock. The auto suite uses Create mode (create=true →
+            // Rust returns Create → allow=false), so this branch only fires for the
+            // manual Allow button.
             e.handler.setWebController(null);
+            try {
+              data.onShowNewWindow?.(new webview.WebviewController(), e.targetUrl ?? '');
+            } catch (err) {
+              hilog.warn(0x1999, 'WebviewSurface', 'Allow new-window dialog failed: %{public}s', String(err));
+            }
           }
         });
 
@@ -1484,12 +1496,17 @@ function BuildWebview(data: ManagedWebview) {
         if (!allow) {
           e.handler.setWebController(null);
         } else {
-          // #85: see overlay branch above. Allow at the embedding runtime level, but deny
-          // the ArkWeb popup via `setWebController(null)` (non-blocking) so the
-          // already-queued `new-window-requested` event delivers to JS instead
-          // of deadlocking the UI thread on an unhosted controller. No dialog —
-          // it would cover the main webview (see overlay branch comment).
+          // #85 / Allow: see overlay branch above. Cancel ArkWeb's popup
+          // (`setWebController(null)`, non-blocking) and show an in-page
+          // NewWindowDialog whose `Web` loads the target URL directly — the OHOS
+          // equivalent of "open in a new in-page window". Auto suite uses Create
+          // mode so this branch only fires for the manual Allow button.
           e.handler.setWebController(null);
+          try {
+            data.onShowNewWindow?.(new webview.WebviewController(), e.targetUrl ?? '');
+          } catch (err) {
+            hilog.warn(0x1999, 'WebviewSurface', 'Allow new-window dialog failed: %{public}s', String(err));
+          }
         }
       });
   }
@@ -1857,14 +1874,13 @@ class WebviewSurface {
           false, // default deny when no handler
         );
       },
-      onShowNewWindow: (_controller: webview.WebviewController, targetUrl: string): void => {
-        // #85: best-effort popup for the manual dialog test. The ArkWeb popup was
-        // already denied (`setWebController(null)` in onWindowNew) to avoid
-        // deadlocking the UI thread, so this dialog's `Web` loads `src:''` and
-        // won't show targetUrl content — cosmetic only. The auto Allow test only
-        // verifies the `new-window-requested` event delivers, not a popup.
+      onShowNewWindow: (controller: webview.WebviewController, targetUrl: string): void => {
+        // Allow-branch popup: `.onWindowNew` cancelled ArkWeb's own popup
+        // (`setWebController(null)`) and routed here. The dialog's `Web` loads
+        // targetUrl directly (NewWindowDialog builder `src=params.url`), so the
+        // popup shows the target page as an in-page window — OHOS Allow=dialog.
         try {
-          openNewWindowDialog(newWindowUiCtx, new webview.WebviewController(), targetUrl);
+          openNewWindowDialog(newWindowUiCtx, controller, targetUrl);
         } catch (err) {
           console.error("[NEWWIN] show dialog failed: " + String(err));
         }
@@ -2135,6 +2151,7 @@ class WebviewSurface {
   async createPdf(
     id: string,
     path: string,
+    pdfConfig: WebviewPdfConfig | null,
     callContext: BridgeCallContext,
   ): Promise<boolean> {
     const entry = await this.controllerEntry(id, callContext);
@@ -2144,6 +2161,7 @@ class WebviewSurface {
       return false;
     }
     try {
+      // Fixed A4 defaults; the caller-supplied `pdfConfig` overrides per-field.
       const DEFAULT_PDF_CONFIG: webview.PdfConfiguration = {
         width: 8.27,
         height: 11.69,
@@ -2153,7 +2171,16 @@ class WebviewSurface {
         marginRight: 0,
         shouldPrintBackground: true,
       };
-      const pdfData = await controller.createPdf(DEFAULT_PDF_CONFIG);
+      const cfg: webview.PdfConfiguration = pdfConfig ? {
+        width: pdfConfig.width ?? DEFAULT_PDF_CONFIG.width,
+        height: pdfConfig.height ?? DEFAULT_PDF_CONFIG.height,
+        marginTop: pdfConfig.marginTop ?? DEFAULT_PDF_CONFIG.marginTop,
+        marginBottom: pdfConfig.marginBottom ?? DEFAULT_PDF_CONFIG.marginBottom,
+        marginLeft: pdfConfig.marginLeft ?? DEFAULT_PDF_CONFIG.marginLeft,
+        marginRight: pdfConfig.marginRight ?? DEFAULT_PDF_CONFIG.marginRight,
+        shouldPrintBackground: pdfConfig.shouldPrintBackground ?? DEFAULT_PDF_CONFIG.shouldPrintBackground,
+      } : DEFAULT_PDF_CONFIG;
+      const pdfData = await controller.createPdf(cfg);
       const buffer = pdfData.pdfArrayBuffer().buffer;
       if (!buffer || buffer.byteLength === 0) {
         return false;
@@ -2595,7 +2622,7 @@ export class WebviewPlugin extends AsyncPluginBase {
 
     if (action === "create-pdf") {
       const request = parsePrintRequest(payload);
-      const success = await surface.createPdf(request.id, request.path, context);
+      const success = await surface.createPdf(request.id, request.path, request.pdfConfig ?? null, context);
       return {
         typeName: PRINT_RESPONSE_TYPE,
         value: new WebviewPrintResponse(success),

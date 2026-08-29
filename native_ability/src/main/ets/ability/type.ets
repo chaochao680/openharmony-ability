@@ -29,17 +29,27 @@ export interface KeyboardCallback {
   onKeyboardHeightChange: (height: number) => void;
 }
 
-// Must match napi-generated index.d.ts inline type for onNewWant
+// NewWantData payload for onNewWant. Optional continuation fields are read with
+// unwrap_or fallbacks on the Rust side (lifecycle.rs), so older payloads without
+// them stay valid. isContinuation is the symbolic result of comparing
+// launchParam.launchReason === AbilityConstant.LaunchReason.CONTINUATION.
 export interface NewWantData {
   uri: string;
   parametersJson: string;
+  isContinuation?: boolean;
+}
+
+export interface CreateWithWantData {
+  uri: string;
+  isContinuation?: boolean;
+  parametersJson?: string;
 }
 
 export interface WindowStageEventCallback {
   onWindowStageCreate: () => void;
   onWindowStageDestroy: () => void;
   onAbilityCreate: (arg: string) => void;
-  onAbilityCreateWithWant: (data: { uri: string }) => void;
+  onAbilityCreateWithWant: (data: CreateWithWantData) => void;
   onAbilityDestroy: () => void;
   onAbilitySaveState: () => string;
   onWindowStageEvent: (arg: number) => void;

@@ -165,8 +165,17 @@ export class NativeAbility extends UIAbility {
       // (lifecycle.rs → store_initial_want_uri). Without this, deep-link
       // getCurrent() lazy-take returns null on cold start. Like onAbilityCreate above,
       // this was dropped during the NativeAbility refactor and never re-added.
+      // isContinuation/parametersJson additionally feed the Rust-side continuation
+      // storage (app.rs CONTINUATION_RESTORE/CONTINUATION_DATA) for cross-device
+      // app-continuation restore; launchReason is compared symbolically here (never
+      // sent as a raw number across the bridge).
       try {
-        lifecycle.windowStageEventCallback.onAbilityCreateWithWant({ uri: want.uri ?? '' });
+        const isContinuation = launchParam.launchReason === AbilityConstant.LaunchReason.CONTINUATION;
+        lifecycle.windowStageEventCallback.onAbilityCreateWithWant({
+          uri: want.uri ?? '',
+          isContinuation,
+          parametersJson: JSON.stringify(want.parameters ?? {}),
+        });
       } catch (e) {
         hilog.error(DOMAIN, 'NativeAbility', 'onAbilityCreateWithWant failed: %{public}s', String(e));
       }
@@ -507,6 +516,23 @@ export class NativeAbility extends UIAbility {
     }
   }
 
+  // 应用接续（continuation）目标端恢复入口。系统在接续拉起目标 Ability 时调用
+  // onWindowStageRestore 而非 onWindowStageCreate（实测 MateBook Pro OpenHarmony 6.1.0
+  // 冷启动接续亦走此回调）。Tauri 不使用 ArkUI 页面栈自动恢复——接续数据是自定义 JSON
+  // route（源端 onContinue→continuationData，目标端 onCreate→onAbilityCreateWithWant
+  // 存入 Rust），故必须像 onWindowStageCreate 一样手动 loadContentByName + 接线 bridge
+  // windowStage，否则窗口无内容 → SetUIContent timeout → 白屏（只剩 app 图标）。
+  // 冷启动接续：windowStageActive=false（onCreate 不置位）→ 全量 setup；
+  // 热启动接续：windowStageActive=true（原 onWindowStageCreate 已 setup）→ 跳过避免重复 load。
+  async onWindowStageRestore(windowStage: window.WindowStage, _want: Want, _launchParam: AbilityConstant.LaunchParam): Promise<void> {
+    if (this.windowStageActive) {
+      hilog.info(DOMAIN, 'NativeAbility', 'onWindowStageRestore: stage already active (warm continuation), skipping full setup');
+      return;
+    }
+    hilog.info(DOMAIN, 'NativeAbility', 'onWindowStageRestore: cold continuation, delegating to window-stage setup');
+    await this.onWindowStageCreate(windowStage);
+  }
+
   onWindowStageDestroy(): void | Promise<void> {
     this.forEachLifecycle((lifecycle) => lifecycle.windowStageEventCallback.onWindowStageDestroy());
     try {
@@ -597,7 +623,44 @@ export class NativeAbility extends UIAbility {
       // WindowManager might not be initialized yet, ignore
     }
 
-    this.forEachLifecycle((lifecycle) => lifecycle.windowStageEventCallback.onNewWant({ uri, parametersJson }));
+    // isContinuation marks a warm-start app-continuation restore; consumed by the
+    // Rust-side continuation storage (lifecycle.rs → store_continuation).
+    const isContinuation = launchParam.launchReason === AbilityConstant.LaunchReason.CONTINUATION;
+    this.forEachLifecycle((lifecycle) => lifecycle.windowStageEventCallback.onNewWant({ uri, parametersJson, isContinuation }));
+  }
+
+  // Source-side app-continuation save. The snapshot is PRE-REGISTERED by the JS
+  // side (`setContinuationData` → Rust `CONTINUATION_SNAPSHOT`); this callback
+  // only reads it synchronously via NAPI (`readContinueSnapshot`). onContinue is
+  // a synchronous callback — never await a Promise or block here (the snapshot
+  // pattern exists precisely so we don't have to). Empty snapshot → MISMATCH
+  // (explicit opt-in: an app that never registered data refuses to migrate).
+  // NOTE: EntryAbility subclasses must NOT override onContinue — that would
+  // shadow this snapshot logic.
+  onContinue(wantParam: Record<string, Object>): AbilityConstant.OnContinueResult {
+    let snapshot: string = "";
+    try {
+      const nativeModules = ProcessInitializer.getNativeModules();
+      const primaryModule: ESObject = nativeModules[0] as ESObject;
+      if (primaryModule && typeof primaryModule.readContinueSnapshot === "function") {
+        snapshot = primaryModule.readContinueSnapshot() as string;
+      }
+    } catch (e) {
+      hilog.error(DOMAIN, 'NativeAbility', 'onContinue - snapshot read failed: %{public}s', String(e));
+      return AbilityConstant.OnContinueResult.MISMATCH;
+    }
+
+    if (snapshot.length === 0) {
+      hilog.info(DOMAIN, 'NativeAbility', 'onContinue - empty snapshot, refusing (MISMATCH)');
+      return AbilityConstant.OnContinueResult.MISMATCH;
+    }
+
+    // Reserved key round-trip: the target side reads it from getContinuationData()
+    // → JSON.parse(...).continuationData. Passed through verbatim — the payload
+    // schema is an application-level contract.
+    wantParam["continuationData"] = snapshot;
+    hilog.info(DOMAIN, 'NativeAbility', 'onContinue - AGREE, snapshot length: %{public}d', snapshot.length);
+    return AbilityConstant.OnContinueResult.AGREE;
   }
 
   onConfigurationUpdate(newConfig: Configuration): void {

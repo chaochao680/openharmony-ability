@@ -869,6 +869,28 @@ export class WindowPlugin extends AsyncPluginBase {
     context: BridgeCallContext,
   ): Promise<BridgeTypedValue> {
     const request = parseWindowIdRequest(payload);
+
+    // destroy-window is idempotent: a window closed via the notify_window_close
+    // path (FloatPage ✕ button: removeWindow + destroyWindow; or system X:
+    // aboutToDisappear) is already destroyed by the time the Rust drain's
+    // on_window_close spawns its safety destroy_window bridge call. requireWindow
+    // would throw "Unknown OS sub-window" for those — instead soft-lookup and
+    // treat already-gone as success, so the safety spawn is a clean no-op rather
+    // than an error-log every close. See doc/OHOS窗口遗留问题.md (问题一).
+    if (action === "destroy-window") {
+      if (request.windowId === 0) {
+        throw new Error("Cannot destroy the main Ability window (id 0)");
+      }
+      const existing = this.windows.get(request.windowId)
+        ?? WindowManager.getInstance().getWindow(request.windowId);
+      if (existing !== undefined) {
+        await existing.destroyWindow();
+        this.windows.delete(request.windowId);
+      }
+      // else: already destroyed — idempotent success
+      return { typeName: ACKNOWLEDGEMENT_TYPE, value: new WindowAcknowledgement(true) };
+    }
+
     const win = this.requireWindow(request.windowId, context);
     try {
       const dynamic: ESObject = this.dynamic(win);
@@ -903,15 +925,6 @@ export class WindowPlugin extends AsyncPluginBase {
         // WindowManager.showWindowMethod, which picks restore() for a minimized
         // main window and showWindow() for sub-windows.
         WindowManager.getInstance().showWindowMethod(request.windowId);
-      } else if (action === "destroy-window") {
-        // id 0 is the host Ability's own main window — it cannot be destroyed by the
-        // plugin (it is owned by the Ability lifecycle, not create-os-window). Only
-        // tear down entries the plugin itself created.
-        if (request.windowId === 0) {
-          throw new Error("Cannot destroy the main Ability window (id 0)");
-        }
-        await win.destroyWindow();
-        this.windows.delete(request.windowId);
       }
       return { typeName: ACKNOWLEDGEMENT_TYPE, value: new WindowAcknowledgement(true) };
     } catch (error) {

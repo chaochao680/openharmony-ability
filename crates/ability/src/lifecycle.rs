@@ -333,6 +333,10 @@ pub fn create_lifecycle_handle<'a>(
         let uri = data.get_named_property::<String>("uri")?;
         let parameters_json = data.get_named_property::<String>("parametersJson")?;
         crate::app::store_want_parameters(&parameters_json);
+        // isContinuation is optional-with-fallback: missing or wrong type
+        // (older HAR payload) degrades to false rather than failing the callback.
+        let is_continuation = data.get_named_property::<bool>("isContinuation").unwrap_or(false);
+        crate::app::store_continuation(is_continuation, &parameters_json);
         if let Some(ref mut h) = *on_new_want_app.event_loop.borrow_mut() {
             h(Event::NewWant { uri })
         }
@@ -344,6 +348,13 @@ pub fn create_lifecycle_handle<'a>(
             let data = ctx.first_arg::<Object>()?;
             let uri = data.get_named_property::<String>("uri")?;
             crate::app::store_initial_want_uri(&uri);
+            // Continuation fields are optional-with-fallback: missing or wrong
+            // type (older HAR payload) degrades to false / empty rather than
+            // failing the callback.
+            let is_continuation = data.get_named_property::<bool>("isContinuation").unwrap_or(false);
+            let parameters_json =
+                data.get_named_property::<String>("parametersJson").unwrap_or_default();
+            crate::app::store_continuation(is_continuation, &parameters_json);
             Ok(())
         })?;
 

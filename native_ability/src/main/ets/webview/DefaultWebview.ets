@@ -42,12 +42,12 @@ function handleWindowNew(
   const targetUrl: string = event.targetUrl ?? '';
   const isAlert: boolean = event.isAlert ?? false;
   const isUserTrigger: boolean = event.isUserTrigger ?? false;
-  hilog.debug(DOMAIN, 'DefaultWebview', '%{public}s onWindowNew: targetUrl=%{public}s, isAlert=%{public}s, isUserTrigger=%{public}s',
+  hilog.info(DOMAIN, 'DefaultWebview', '%{public}s onWindowNew: targetUrl=%{public}s, isAlert=%{public}s, isUserTrigger=%{public}s',
     tag, targetUrl, String(isAlert), String(isUserTrigger));
   try {
     if (typeof data?.onWindowNew === 'function') {
       const result: OnWindowNewResult = data.onWindowNew(targetUrl, isAlert, isUserTrigger);
-      hilog.debug(DOMAIN, 'DefaultWebview', '%{public}s onWindowNew: result={allow:%{public}s, isCreate:%{public}s}', tag, String(result.allow), String(result.isCreate));
+      hilog.info(DOMAIN, 'DefaultWebview', '%{public}s onWindowNew: result={allow:%{public}s, isCreate:%{public}s}', tag, String(result.allow), String(result.isCreate));
       if (result.isCreate) {
         // Create mode: the embedding runtime's handler already created a real OS window
         // via WebviewWindowBuilder::build() → createOSWindow.
@@ -55,15 +55,16 @@ function handleWindowNew(
         // preventing double windows.
         // Note: if the handler failed to create a window, this results in a silent no-op
         // (no dialog, no window). The handler should log errors on its side.
-        hilog.debug(DOMAIN, 'DefaultWebview', '%{public}s onWindowNew: CREATE — OS window already created by handler', tag);
+        hilog.info(DOMAIN, 'DefaultWebview', '%{public}s onWindowNew: CREATE — OS window already created by handler', tag);
         event.handler.setWebController(null);
       } else if (result.allow) {
         // Allow mode: open in-page dialog
-        hilog.debug(DOMAIN, 'DefaultWebview', '%{public}s onWindowNew: ALLOW — opening dialog', tag);
+        hilog.info(DOMAIN, 'DefaultWebview', '%{public}s onWindowNew: ALLOW — opening dialog', tag);
         const newCtrl = new web_webview.WebviewController();
         event.handler.setWebController(newCtrl);
         if (data?.uiContext) {
           const uiCtx = data.uiContext;
+          hilog.info(DOMAIN, 'DefaultWebview', '%{public}s onWindowNew: scheduling openNewWindowDialog', tag);
           setTimeout(() => {
             openNewWindowDialog(uiCtx, newCtrl, targetUrl);
           }, 0);
@@ -71,11 +72,11 @@ function handleWindowNew(
           hilog.warn(DOMAIN, 'DefaultWebview', '%{public}s onWindowNew: no uiContext, cannot open dialog', tag);
         }
       } else {
-        hilog.debug(DOMAIN, 'DefaultWebview', '%{public}s onWindowNew: DENY', tag);
+        hilog.info(DOMAIN, 'DefaultWebview', '%{public}s onWindowNew: DENY', tag);
         event.handler.setWebController(null);
       }
     } else {
-      hilog.debug(DOMAIN, 'DefaultWebview', '%{public}s onWindowNew: no handler, default DENY', tag);
+      hilog.warn(DOMAIN, 'DefaultWebview', '%{public}s onWindowNew: no handler (data.onWindowNew not a function), default DENY', tag);
       event.handler.setWebController(null);
     }
   } catch (e) {

@@ -81,6 +81,7 @@ export {
 } from "./src/main/ets/helper/key_synthesis";
 
 // === Bridge plugins (aggregated from plugins/ - see pack-plugins.ps1) ===
+export { AccessibilityPlugin } from "./src/main/ets/plugins/accessibility/AccessibilityPlugin";
 export { AppControlPlugin } from "./src/main/ets/plugins/app-control/AppControlPlugin";
 export { AccountPlugin } from "./src/main/ets/plugins/account/AccountPlugin";
 export { AutostartPlugin } from "./src/main/ets/plugins/autostart/AutostartPlugin";

@@ -1001,6 +1001,16 @@ pub fn notify_window_close(window_id: i32) {
             poisoned.into_inner().push(window_id);
         }
     }
+    // Wake the embedding runtime's event loop so it drains the queue promptly.
+    // Without this, a sub-window close produces no `MainEvent` to drive the next
+    // iteration, so the queued close (and the downstream `CloseRequested` →
+    // `Destroyed` events) would sit undrained indefinitely. The main-window
+    // path wakes via `tao::EventLoopProxy::send_event` → `waker.wake()`; this
+    // mirrors that for the NAPI-driven sub-window path. `OpenHarmonyWaker::new()`
+    // reads the global `WAKER` live at `wake()` time (see `waker.rs`), so it is
+    // safe even though `create_lifecycle_handle` may not have run yet — a no-op
+    // wake leaves the close queued for a later iteration.
+    OpenHarmonyWaker::new().wake();
 }
 
 /// Drain all pending window close requests.
@@ -1041,6 +1051,17 @@ pub static CURSOR_POSITION_Y: std::sync::atomic::AtomicU64 = std::sync::atomic::
 pub fn update_cursor_position(x: f64, y: f64) {
     CURSOR_POSITION_X.store(x.to_bits(), std::sync::atomic::Ordering::Relaxed);
     CURSOR_POSITION_Y.store(y.to_bits(), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// NAPI function called from the ArkTS `onContinue` lifecycle callback to
+/// synchronously read the source-side continuation snapshot (pre-registered
+/// via `setContinuationData`). `onContinue` is a synchronous callback, so the
+/// read must be a plain NAPI call — no Promise, no bridge round-trip. Empty
+/// string means "nothing registered" (the caller refuses with MISMATCH).
+#[napi]
+#[cfg(target_env = "ohos")]
+pub fn read_continue_snapshot() -> String {
+    crate::app::peek_continue_snapshot()
 }
 
 /// Global queue for pending window status changes from ArkTS
@@ -1155,6 +1176,164 @@ pub fn take_initial_want_uri() -> String {
         .unwrap_or_default()
 }
 
+// --- app-continuation storage (launchReason === CONTINUATION restore) ---
+
+/// Marks whether the current launch is an app-continuation restore.
+///
+/// Peek-only (never drained): queries are idempotent and can be repeated
+/// without consuming the continuation payload.
+pub(crate) static CONTINUATION_RESTORE: Mutex<bool> = Mutex::new(false);
+
+/// Stores the continuation payload JSON (`want.parameters`) from a
+/// continuation-restore launch (cold start `onCreate` or warm `onNewWant`).
+pub(crate) static CONTINUATION_DATA: Mutex<String> = Mutex::new(String::new());
+
+/// Stores the continuation signal from a lifecycle callback.
+///
+/// `is_continuation == true` writes both the flag and the payload (passed
+/// through verbatim — the wantParam schema is an application-level contract).
+/// `is_continuation == false` clears both: the statics survive across Ability
+/// instances, so a plain relaunch must not observe the previous session's
+/// continuation payload.
+///
+/// Public (not `pub(crate)`) so the `plugin-continuation` crate's unit tests can
+/// drive the statics; production callers are the lifecycle closures.
+pub fn store_continuation(is_continuation: bool, parameters_json: &str) {
+    if let (Ok(mut flag), Ok(mut data)) = (CONTINUATION_RESTORE.lock(), CONTINUATION_DATA.lock()) {
+        *flag = is_continuation;
+        *data = if is_continuation {
+            parameters_json.to_string()
+        } else {
+            String::new()
+        };
+    } else {
+        crate::error!("continuation mutex poisoned in store");
+    }
+}
+
+/// Returns whether the current launch is an app-continuation restore.
+///
+/// Peek-only: does not consume [`take_continuation_data`], safe to call
+/// repeatedly. Consumed by the `plugin-continuation` facade
+/// (`ContinuationClient`).
+pub fn is_continuation_restore() -> bool {
+    CONTINUATION_RESTORE.lock().map(|f| *f).unwrap_or(false)
+}
+
+/// Takes the continuation payload JSON (draining the stored value).
+///
+/// Safe to call from any thread. The value is consumed (replaced with an empty
+/// `String`), so a second call returns `""` — empty also means the launch was
+/// not a continuation restore. Consumed by the `plugin-continuation` facade
+/// (`ContinuationClient`).
+pub fn take_continuation_data() -> String {
+    CONTINUATION_DATA
+        .lock()
+        .map(|mut d| std::mem::take(&mut *d))
+        .unwrap_or_default()
+}
+
+// --- app-continuation source-side snapshot (onContinue save) ---
+
+/// Source-side continuation snapshot, pre-registered by the application via
+/// `setContinuationData` and read synchronously by the ArkTS `onContinue`
+/// lifecycle callback when the system initiates a migration.
+///
+/// Distinct from [`CONTINUATION_DATA`] (target-side restore payload, drained on
+/// take): the snapshot is **peek-only** — a cancelled migration must leave it
+/// intact so a retry reads the same value. A fresh `set` overwrites.
+pub(crate) static CONTINUATION_SNAPSHOT: Mutex<String> = Mutex::new(String::new());
+
+/// Stores the source-side continuation snapshot (overwrite semantics).
+///
+/// `""` clears the snapshot (an empty snapshot makes `onContinue` refuse the
+/// migration with MISMATCH). Public so the `plugin-continuation` crate's unit
+/// tests can drive the static; the production caller is the facade's
+/// `ContinuationClient::set_continuation_data`.
+pub fn store_continue_snapshot(snapshot: &str) {
+    if let Ok(mut snap) = CONTINUATION_SNAPSHOT.lock() {
+        *snap = snapshot.to_string();
+    } else {
+        crate::error!("continuation snapshot mutex poisoned in store");
+    }
+}
+
+/// Returns the source-side continuation snapshot without consuming it
+/// (peek-only). Read by the ArkTS `onContinue` callback via the
+/// `read_continue_snapshot` NAPI export.
+pub fn peek_continue_snapshot() -> String {
+    CONTINUATION_SNAPSHOT.lock().map(|s| s.clone()).unwrap_or_default()
+}
+
+/// Tests for the app-continuation global statics.
+#[cfg(test)]
+mod continuation_tests {
+    use super::*;
+
+    #[test]
+    fn test_take_continuation_data_drains() {
+        store_continuation(true, r#"{"scrollOffset":120,"route":"/article/42"}"#);
+        assert_eq!(
+            take_continuation_data(),
+            r#"{"scrollOffset":120,"route":"/article/42"}"#
+        );
+        // Second take is empty (draining semantics).
+        assert_eq!(take_continuation_data(), "");
+        // Flag survives the data take (peek does not drain).
+        assert!(is_continuation_restore());
+        // Clean up for other tests sharing the static.
+        store_continuation(false, "");
+    }
+
+    #[test]
+    fn test_non_continuation_launch_clears_stale_payload() {
+        store_continuation(true, r#"{"stale":true}"#);
+        // A plain relaunch stores isContinuation=false — must clear both.
+        store_continuation(false, r#"{}"#);
+        assert!(!is_continuation_restore());
+        assert_eq!(take_continuation_data(), "");
+    }
+
+    #[test]
+    fn test_is_continuation_restore_idempotent() {
+        store_continuation(true, r#"{"a":1}"#);
+        assert!(is_continuation_restore());
+        assert!(is_continuation_restore());
+        assert!(is_continuation_restore());
+        // Data still intact after repeated peeks.
+        assert_eq!(take_continuation_data(), r#"{"a":1}"#);
+        // Clean up for other tests sharing the static.
+        store_continuation(false, "");
+    }
+
+    #[test]
+    fn test_continue_snapshot_peek_does_not_drain() {
+        store_continue_snapshot(r#"{"route":"/editor","draft":42}"#);
+        // Repeated peeks (a cancelled migration retried) read the same value.
+        assert_eq!(peek_continue_snapshot(), r#"{"route":"/editor","draft":42}"#);
+        assert_eq!(peek_continue_snapshot(), r#"{"route":"/editor","draft":42}"#);
+        // Clean up for other tests sharing the static.
+        store_continue_snapshot("");
+    }
+
+    #[test]
+    fn test_continue_snapshot_overwrites() {
+        store_continue_snapshot("first");
+        store_continue_snapshot("second");
+        assert_eq!(peek_continue_snapshot(), "second");
+        // Clean up for other tests sharing the static.
+        store_continue_snapshot("");
+    }
+
+    #[test]
+    fn test_continue_snapshot_empty_clears() {
+        store_continue_snapshot("value");
+        // Empty string clears (onContinue refuses with MISMATCH on empty).
+        store_continue_snapshot("");
+        assert_eq!(peek_continue_snapshot(), "");
+    }
+}
+
 /// Tests for WANT_PARAMETERS and INITIAL_WANT_URI global statics.
 #[cfg(test)]
 mod want_parameters_tests {
@@ -1189,6 +1368,10 @@ mod want_parameters_tests {
 mod tests {
     use super::OpenHarmonyAppInner;
     use crate::{AvoidArea, AvoidAreaType, Rect};
+    // Cursor-tracking items are cfg(target_env = "ohos")-gated; import them the
+    // same way so the test below compiles on the device target only.
+    #[cfg(target_env = "ohos")]
+    use crate::{update_cursor_position, CURSOR_POSITION_X, CURSOR_POSITION_Y};
 
     #[test]
     fn render_owner_rejects_overlap_and_ignores_stale_surface_callbacks() {
@@ -1323,6 +1506,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_env = "ohos")]
     fn update_cursor_position_stores_vp_coordinates() {
         use std::sync::atomic::Ordering;
         update_cursor_position(10.5, 20.25);

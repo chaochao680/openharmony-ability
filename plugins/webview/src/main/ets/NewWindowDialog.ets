@@ -42,10 +42,13 @@ export function newWindowDialogBuilder(params: { controller: web_webview.Webview
     .padding({ left: 12, right: 12 })
     .backgroundColor('#F5F5F5')
 
-    // Web content — this hosts the controller passed to setWebController in
-    // onWindowNew, preventing the ArkWeb new-window render from deadlocking
-    // (an unhosted controller causes the render process to block forever).
-    Web({ src: '', controller: params.controller })
+    // Web content — loads the target URL directly. ArkWeb's own popup is
+    // cancelled (`setWebController(null)` in onWindowNew) to avoid deadlocking the
+    // UI thread on an unhosted controller; this independent Web hosts the dialog's
+    // own controller and navigates to the target URL, giving the OHOS equivalent of
+    // "open in a new in-page window" (Allow). multiWindowAccess is disabled to
+    // prevent infinite nesting.
+    Web({ src: params.url, controller: params.controller })
       .width('100%')
       .layoutWeight(1)
       .javaScriptAccess(true)
