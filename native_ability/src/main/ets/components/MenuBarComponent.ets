@@ -213,17 +213,27 @@ export struct MenuBarComponent {
   // --- Native icon resolution ---
 
   /**
-   * Maps a nativeIcon string (e.g. "sys.symbol.ohos_star") to a SymbolGlyphModifier.
-   * $r() requires compile-time string literals, so we use a switch/case for known-valid variants.
+   * Maps a nativeIcon string (e.g. "sys.symbol.ohos_star") to the raw symbol Resource.
+   * $r() requires compile-time string literals, so we use a switch/case for known-valid variants
+   * (names validated against the SDK's sysResource.js symbol table).
    * Returns null for unmapped icons, which renders as no icon (consistent with Windows/Linux).
    */
-  private nativeIconSymbol(nativeIcon: string): SymbolGlyphModifier | null {
+  private nativeIconResource(nativeIcon: string): Resource | null {
     switch (nativeIcon) {
-      case 'sys.symbol.ohos_star': return new SymbolGlyphModifier($r('sys.symbol.ohos_star'));
-      case 'sys.symbol.ohos_lock': return new SymbolGlyphModifier($r('sys.symbol.ohos_lock'));
-      case 'sys.symbol.ohos_wifi': return new SymbolGlyphModifier($r('sys.symbol.ohos_wifi'));
+      case 'sys.symbol.ohos_star': return $r('sys.symbol.ohos_star');
+      case 'sys.symbol.ohos_lock': return $r('sys.symbol.ohos_lock');
+      case 'sys.symbol.ohos_wifi': return $r('sys.symbol.ohos_wifi');
+      case 'sys.symbol.folder': return $r('sys.symbol.folder');
       default: return null;
     }
+  }
+
+  /**
+   * Maps a nativeIcon string to a SymbolGlyphModifier (for MenuItem symbolStartIcon).
+   */
+  private nativeIconSymbol(nativeIcon: string): SymbolGlyphModifier | null {
+    const resource = this.nativeIconResource(nativeIcon);
+    return resource ? new SymbolGlyphModifier(resource) : null;
   }
 
   // --- Menu builders ---
@@ -334,6 +344,12 @@ export struct MenuBarComponent {
             Image(this.iconPixelMaps.get(item.id))
               .width(16)
               .height(16)
+              .margin({ right: 4 })
+          } else if (item.nativeIcon && this.nativeIconResource(item.nativeIcon)) {
+            // Top-level nativeIcon: render as a system symbol, mirroring the
+            // Image branch above (submenu icon and nativeIcon are mutually exclusive)
+            SymbolGlyph(this.nativeIconResource(item.nativeIcon) as Resource)
+              .fontSize(16)
               .margin({ right: 4 })
           }
           Text(item.text ?? '')

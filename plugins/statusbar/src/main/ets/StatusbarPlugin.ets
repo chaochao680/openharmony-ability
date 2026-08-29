@@ -192,23 +192,32 @@ export class StatusbarPlugin extends AsyncPluginBase {
       hilog.info(DOMAIN, "StatusbarPlugin", `add: quickOperation abilityName="${quickOperation.abilityName}" title="${quickOperation.title}" height=${quickOperation.height} moduleName=${quickOperation.moduleName} loadingStatus=${quickOperation.loadingStatus} menuLen=${statusBarGroupMenu.length}`);
 
       try {
-        // Use the AsyncCallback overload (API 14+). JsStatusbarManager builds
-        // its ScbServerMessageReceiver ASYNCHRONOUSLY ~14ms after the sync
-        // addToStatusBar() call returns; registering click handlers on the
-        // sync return binds them to the previous receiver, which the new
-        // receiver then replaces — rightMenuClick/statusBarIconClick listeners
-        // are silently dropped. Registering in the completion callback runs
-        // strictly after the new receiver exists.
-        statusBarManager.addToStatusBar(abilityContext, opts, (err: BusinessError) => {
-          if (err) {
-            hilog.error(DOMAIN, "StatusbarPlugin", "addToStatusBar callback err: %{public}d %{public}s", err.code, err.message);
-            return;
-          }
-          reRegisterStatusBarClickHandlers();
+        // Use the AsyncCallback overload (API 14+) AND await it before
+        // acknowledging the bridge call. The tray backend (tray-icon
+        // platform_impl/ohos) issues remove+add back-to-back on its worker and
+        // treats this handler's return as "the call finished". Returning on the
+        // sync path (before SCB processes the request) let the add's SCB
+        // processing overlap the previous remove's async teardown and corrupt
+        // status bar rendering.
+        //
+        // JsStatusbarManager also builds its ScbServerMessageReceiver
+        // ASYNCHRONOUSLY ~14ms after the sync addToStatusBar() call returns;
+        // registering click handlers on the sync return binds them to the
+        // previous receiver, which the new receiver then replaces —
+        // rightMenuClick/statusBarIconClick listeners are silently dropped.
+        // Registering in the completion callback runs strictly after the new
+        // receiver exists.
+        await new Promise<void>((resolve, reject) => {
+          statusBarManager.addToStatusBar(abilityContext, opts, (err: BusinessError) => {
+            if (err) {
+              hilog.error(DOMAIN, "StatusbarPlugin", "addToStatusBar callback err: %{public}d %{public}s", err.code, err.message);
+              reject(err);
+              return;
+            }
+            reRegisterStatusBarClickHandlers();
+            resolve();
+          });
         });
-        // Keep the sync registration as a baseline: harmless (off+on), and
-        // preserves the pre-existing behaviour if the callback never fires.
-        reRegisterStatusBarClickHandlers();
         return { typeName: ACKNOWLEDGEMENT_TYPE, value: new StatusbarAcknowledgement(true) };
       } catch (e) {
         const err = e as BusinessError;
@@ -220,7 +229,23 @@ export class StatusbarPlugin extends AsyncPluginBase {
     if (action === "remove") {
       const abilityContext = context.abilityContext;
       try {
-        statusBarManager.removeFromStatusBar(abilityContext);
+        // Await the AsyncCallback overload (API 14+): the tray backend issues
+        // remove+add back-to-back and treats this handler's return as
+        // "removal finished". The sync overload returns before SCB processes
+        // the removal, so a following add lands while the old registration is
+        // still live — and addToStatusBar documents duplicate registration as
+        // a silent no-op ("同一个应用仅支持添加一个图标，重复添加无效"),
+        // leaving the old icon rendered.
+        await new Promise<void>((resolve, reject) => {
+          statusBarManager.removeFromStatusBar(abilityContext, (err: BusinessError) => {
+            if (err) {
+              hilog.error(DOMAIN, "StatusbarPlugin", "remove callback err: %{public}d %{public}s", err.code, err.message);
+              reject(err);
+              return;
+            }
+            resolve();
+          });
+        });
         return { typeName: ACKNOWLEDGEMENT_TYPE, value: new StatusbarAcknowledgement(true) };
       } catch (e) {
         const err = e as BusinessError;
