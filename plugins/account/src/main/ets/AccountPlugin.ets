@@ -31,7 +31,11 @@ class AccountLoginResponse {
   readonly displayName: string;
   readonly avatarUri: string;
   readonly authorizationCode: string;
-  readonly accessToken: string | null;
+  // Optional property: when absent, napi-ohos's Object::get returns None → Rust
+  // Option<String> = None. A `null` value is NOT decodable — the derive codegen
+  // decodes the field as String (not Option<String>), so null fails with
+  // `StringExpected on AccountLoginResponse.accessToken` (device-verified 2026-08-31).
+  readonly accessToken?: string;
 
   constructor(
     uid: string,
@@ -48,7 +52,9 @@ class AccountLoginResponse {
     this.displayName = displayName;
     this.avatarUri = avatarUri;
     this.authorizationCode = authorizationCode;
-    this.accessToken = accessToken;
+    if (accessToken !== null) {
+      this.accessToken = accessToken;
+    }
   }
 }
 
