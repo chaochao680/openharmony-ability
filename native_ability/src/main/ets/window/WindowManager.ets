@@ -979,6 +979,59 @@ export class WindowManager {
   // Hide the entire Ability (app) to background.
   // Equivalent to macOS Cmd+H (hide:) — all windows become invisible, process stays alive.
   async hideAbility(): Promise<void> {
+    await this.hideWithRestoreGuard();
+  }
+
+  /**
+   * Hide with guard against OHOS system focus restoration.
+   *
+   * Same race as minimizeWithRestoreGuard, but for context.hideAbility(): when a
+   * status-bar tray menu closes, the system restores focus to the app
+   * (startSceneFromOther, focusedOnShow:true → RequestSceneSessionActivation).
+   * If hideAbility() runs immediately, that activation can land AFTER the hide
+   * request and pull the scene back to the foreground, undoing the hide.
+   * Defer the hide until the main window's WINDOW_ACTIVE settles; if it never
+   * fires, a 50ms timeout falls back to direct hide. Mirrors the proven
+   * minimizeWithRestoreGuard pattern. Intentionally NOT wrapped in
+   * serializeOp: hide is an AbilityManager-level app op, not a per-window
+   * WMS op.
+   */
+  private hideWithRestoreGuard(): Promise<void> {
+    return new Promise<void>((resolve) => {
+      const win = this.getWindow(0);
+      if (!win) {
+        hilog.warn(DOMAIN, 'WindowManager', 'hideWithRestoreGuard: main window not found, direct hide');
+        this.doHideAbility().then(() => resolve()).catch(() => resolve());
+        return;
+      }
+      let consumed = false;
+      const finish = () => { try { win.off('windowEvent', onWindowEvent); } catch (_) {} };
+      const doHide = () => {
+        if (consumed) return;
+        consumed = true;
+        finish();
+        hilog.info(DOMAIN, 'WindowManager', 'hideWithRestoreGuard: hiding (settled)');
+        this.doHideAbility().then(() => resolve()).catch(() => resolve());
+      };
+      const onWindowEvent = (eventType: window.WindowEventType) => {
+        if (!consumed && eventType === window.WindowEventType.WINDOW_ACTIVE) {
+          hilog.info(DOMAIN, 'WindowManager', 'hideWithRestoreGuard: WINDOW_ACTIVE fired');
+          doHide();
+        }
+      };
+      try {
+        win.on('windowEvent', onWindowEvent);
+      } catch (_) {
+        hilog.warn(DOMAIN, 'WindowManager', 'hideWithRestoreGuard: windowEvent unsupported, direct hide');
+        this.doHideAbility().then(() => resolve()).catch(() => resolve());
+        return;
+      }
+      hilog.info(DOMAIN, 'WindowManager', 'hideWithRestoreGuard: waiting for WINDOW_ACTIVE (50ms fallback)');
+      setTimeout(doHide, 50);
+    });
+  }
+
+  private async doHideAbility(): Promise<void> {
     if (!this.context) {
       hilog.warn(DOMAIN, 'WindowManager', 'hideAbility: context not set');
       return;
