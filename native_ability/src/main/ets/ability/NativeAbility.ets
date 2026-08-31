@@ -575,6 +575,15 @@ export class NativeAbility extends UIAbility {
       // still preserves lifecycle ordering for state mutation and platform callbacks.
       BridgeHostRegistry.beginClosing(this.bridgeSessionId);
     }
+    // Dispatch onAbilityDestroy synchronously, before the async teardown queue.
+    // The system kills the process ~12ms after onDestroy (Kill Reason:ClearSession),
+    // so the queued version below — which sits behind two awaited bridge round-trips —
+    // never completed before the kill, and the Rust exit chain
+    // (on_ability_destroy → Event::Destroy → LoopDestroyed → RunEvent::ExitRequested/Exit)
+    // never fired. This call is fully synchronous (no await / bridge recv) and completes
+    // in microseconds; prevent_exit() is ineffective on this path by design
+    // (tauri-runtime-wry discards it on LoopDestroyed).
+    this.forEachLifecycle((lifecycle) => lifecycle.windowStageEventCallback.onAbilityDestroy());
     return this.enqueueLifecycleOperation("ability-destroy", async (): Promise<void> => {
       const sessionId = this.bridgeSessionId;
       if (!sessionId) {
@@ -587,7 +596,6 @@ export class NativeAbility extends UIAbility {
           kind: "ability-destroy",
           payload: new BridgeEmptyLifecyclePayload(),
         });
-        this.forEachLifecycle((lifecycle) => lifecycle.windowStageEventCallback.onAbilityDestroy());
       } finally {
         const runtimes = this.moduleRuntimes;
         this.releaseModuleBridges(runtimes);
