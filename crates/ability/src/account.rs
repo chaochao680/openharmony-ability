@@ -166,6 +166,12 @@ pub struct HuaweiAccount {
     bridge: BridgeRuntime,
 }
 
+/// Interactive login timeout. The default 15s bridge timeout fires mid-panel
+/// while the user is still typing credentials / SMS codes on the Account Kit
+/// login UI (device-verified 2026-08-31: "ohos.account.login timed out after
+/// 15000ms" right after a successful panel login).
+const INTERACTIVE_LOGIN_TIMEOUT_MS: u32 = 300_000;
+
 impl HuaweiAccount {
     /// Create a new handle bound to the given app's bridge runtime.
     ///
@@ -179,11 +185,16 @@ impl HuaweiAccount {
 
     /// Interactive login — forces the Huawei account login UI (`forceLogin = true`).
     /// Returns the resulting `AccountInfo` on user confirmation.
+    ///
+    /// Uses a 5-minute bridge timeout: the user may spend minutes on the login
+    /// panel (credentials, SMS verification) before the promise resolves.
     pub async fn login(&self) -> Result<AccountInfo> {
         let response = self
-            .call::<AccountLoginRequest, AccountLoginResponse>(
+            .call_with_options::<AccountLoginRequest, AccountLoginResponse>(
                 "login",
                 AccountLoginRequest {},
+                BridgeCallOptions::default()
+                    .with_timeout_ms(INTERACTIVE_LOGIN_TIMEOUT_MS),
             )
             .await?;
         Ok(response.into())
@@ -227,12 +238,22 @@ impl HuaweiAccount {
         Request: BridgeNapiType,
         Response: BridgeNapiType,
     {
+        self.call_with_options(action, request, BridgeCallOptions::default())
+            .await
+    }
+
+    async fn call_with_options<Request, Response>(
+        &self,
+        action: &str,
+        request: Request,
+        options: BridgeCallOptions,
+    ) -> Result<Response>
+    where
+        Request: BridgeNapiType,
+        Response: BridgeNapiType,
+    {
         self.bridge
-            .call_async::<AccountBridgePlugin, Request, Response>(
-                action,
-                request,
-                BridgeCallOptions::default(),
-            )
+            .call_async::<AccountBridgePlugin, Request, Response>(action, request, options)
             .await
     }
 }

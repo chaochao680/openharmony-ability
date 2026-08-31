@@ -22,7 +22,11 @@ import { SerialTaskQueue } from "../runtime/SerialTaskQueue";
 import { CancellableTaskScope, TaskCancellationSignal } from "../runtime/CancellableTaskScope";
 import { FAULT_REGISTRY, FaultInjectionPlugin } from "./FaultInjection";
 
-const MAX_TIMEOUT_MS = 60_000;
+// Upper bound for per-call timeouts (callers opt in via bridgeInvoke's timeoutMs).
+// 5 minutes: interactive flows that put up system UI (e.g. Huawei account login
+// panel with SMS verification) can legitimately take minutes; the Rust-side
+// default of 15s stays for non-interactive calls.
+const MAX_TIMEOUT_MS = 300_000;
 const MAX_PAYLOAD_BYTES = 512 * 1024;
 const MAX_LIFECYCLE_HISTORY = 16;
 const PLUGIN_HOOK_TIMEOUT_MS = 5_000;

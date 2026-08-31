@@ -29,7 +29,11 @@ use napi_ohos::{
     Env, Error, Result, Status, ValueType,
 };
 const DEFAULT_TIMEOUT_MS: u32 = 15_000;
-const MAX_TIMEOUT_MS: u32 = 60_000;
+/// Upper bound for per-call timeouts (individual calls opt in via
+/// `BridgeCallOptions::with_timeout_ms`). 5 minutes: interactive flows that put
+/// up system UI (e.g. Huawei account login panel with SMS verification) can
+/// legitimately take minutes; the default 15s stays for non-interactive calls.
+const MAX_TIMEOUT_MS: u32 = 300_000;
 
 mod mode {
     pub trait Sealed {}
