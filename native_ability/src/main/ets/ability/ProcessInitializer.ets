@@ -3,10 +3,10 @@ import common from "@ohos.app.ability.common";
 import webview from "@ohos.web.webview";
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { deviceInfo } from '@kit.BasicServicesKit';
-import { ApplicationLifecycle, Module, AbilityInitContext } from "./type";
+import { Module, AbilityInitContext } from "./type";
 import { Loadable } from "../helper/loadable";
 import { WindowManager } from "../window/WindowManager";
-import { DOMAIN } from '../helper/constants';
+import { DOMAIN, NATIVE_MODULE_STORAGE_KEY } from '../helper/constants';
 
 /**
  * ProcessInitializer — process-level initialization, executed only once.
@@ -17,7 +17,10 @@ import { DOMAIN } from '../helper/constants';
  * - native module (.so dynamic library) loading
  * - custom scheme registration
  * - Web engine initialization
- * - module.init → init NAPI → openharmony → run → run_app → render (global singleton)
+ *
+ * Per-session bridge session creation (module.init → BridgeHostRegistry) now lives
+ * in NativeAbility.onCreate, which owns the per-Ability lifecycle. This class only
+ * loads the modules and probes for custom protocols; it no longer calls module.init.
  *
  * Subsequent UIAbility instances skip these initializations (initialized=true) to
  * avoid panicking from duplicate global-singleton initialization.
@@ -26,15 +29,10 @@ import { DOMAIN } from '../helper/constants';
 export class ProcessInitializer {
   private static initialized: boolean = false;
   private static nativeModules: Module[] = [];
-  private static lifecycles: ApplicationLifecycle[] = [];
   private static loadedModuleNames: string[] = [];
 
   static isInitialized(): boolean {
     return this.initialized;
-  }
-
-  static getLifecycles(): ApplicationLifecycle[] {
-    return this.lifecycles;
   }
 
   static getNativeModules(): Module[] {
@@ -45,7 +43,7 @@ export class ProcessInitializer {
     return this.loadedModuleNames;
   }
 
-  private static createInitContext(context: common.UIAbilityContext, moduleName: string): AbilityInitContext {
+  static createInitContext(context: common.UIAbilityContext, moduleName: string): AbilityInitContext {
     return {
       basePath: context?.filesDir ?? "",
       prefPath: context?.filesDir ?? "",
@@ -87,8 +85,8 @@ export class ProcessInitializer {
       this.nativeModules.push(module);
       this.loadedModuleNames.push(name);
 
-      if (typeof module.registerCustomProtocol === "function") {
-        module.registerCustomProtocol();
+      if (typeof (module as ESObject).registerCustomProtocol === "function") {
+        (module as ESObject).registerCustomProtocol();
         webEngineRequired = true;
       }
     }
@@ -98,30 +96,32 @@ export class ProcessInitializer {
       webview.WebviewController.initializeWebEngine();
     }
 
-    // 4. module.init → init NAPI → openharmony → run → run_app → render
-    //    Global singleton: set_helper / set_main_thread_env / TSFN / hilog / tray / sentry
-    const isRestore = (want.parameters?.["ohos.ability.params.abilityRecoveryRestart"] as boolean) ?? false;
-    const state = isRestore ? ((want.parameters?.["ohos.rs.ability.application.state"] as string) ?? "") : "";
-
-    for (let i = 0; i < this.nativeModules.length; i++) {
-      const module: Module = this.nativeModules[i];
-      const moduleName: string = this.loadedModuleNames[i];
-      const initContext = this.createInitContext(context, moduleName);
-      const lifecycle: ApplicationLifecycle = module.init(initContext);
-      this.lifecycles.push(lifecycle);
-
-      const restoredState = state;
-      try {
-        lifecycle.windowStageEventCallback.onAbilityCreate(restoredState);
-      } catch (e) {
-        hilog.error(DOMAIN, 'ProcessInitializer', 'onAbilityCreate failed: %{public}s', String(e));
+    // 4. Register WindowManager.createSubWindow as TSFN for legacy create_os_window path.
+    // The windowing backend's Window::new() calls create_os_window() synchronously, which needs a TSFN
+    // (not the async bridge plugin path) to fire-and-forget sub-window creation on ArkTS.
+    const wm = WindowManager.getInstance();
+    for (const module of this.nativeModules) {
+      if (typeof (module as ESObject).registerCreateSubWindowTsfn === "function") {
+        (module as ESObject).registerCreateSubWindowTsfn(
+          (config: ESObject): Promise<number> => wm.createSubWindow(config)
+        );
+        hilog.info(DOMAIN, 'ProcessInitializer', 'Registered createSubWindow TSFN');
+        break;
       }
-      try {
-        hilog.info(DOMAIN, 'ProcessInitializer', 'onAbilityCreateWithWant want.uri: %{public}s', want.uri ?? '');
-        lifecycle.windowStageEventCallback.onAbilityCreateWithWant?.({ uri: want.uri ?? '' });
-      } catch (e) {
-        hilog.error(DOMAIN, 'ProcessInitializer', 'onAbilityCreateWithWant failed: %{public}s', String(e));
-      }
+    }
+
+    // module.init → bridge session creation is now performed by NativeAbility.onCreate,
+    // which owns the per-Ability lifecycle and constructs BridgeHostRegistry sessions.
+
+    // Publish the primary native module to AppStorage so ArkUI components (FloatPage ×
+    // button / aboutToDisappear, menu.ets closeWindow, NativeAbility windowStatusChange)
+    // can call NAPI fns (notifyWindowClose / notifyWindowStatus). Without this, every
+    // AppStorage.get(NATIVE_MODULE_STORAGE_KEY) returns undefined → notifyWindowClose is
+    // never invoked → ArkTS destroys the Float window but the Rust tauri manager keeps a
+    // zombie entry → getByLabel returns a dead handle → same-label windows can't rebuild
+    // (manual_tests §二十八 close lifecycle defect).
+    if (this.nativeModules.length > 0) {
+      AppStorage.setOrCreate<ESObject>(NATIVE_MODULE_STORAGE_KEY, this.nativeModules[0] as ESObject);
     }
 
     this.initialized = true;

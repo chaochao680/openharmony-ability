@@ -5,7 +5,7 @@ import {
   getMenuBarRecoverFn,
   isMenubarVisible,
 } from "./MenuBarComponent";
-import { AcceleratorMatcher } from "../helper/accelerator_matcher";
+import { AcceleratorMatcher, isClipboardEnabled, isZoomHotkeysEnabled } from "../helper/accelerator_matcher";
 import { KeyCode, pointer } from "@kit.InputKit";
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { BusinessError, deviceInfo } from '@kit.BasicServicesKit';
@@ -223,7 +223,12 @@ struct FloatPage {
                 .onClick(() => {
                   try {
                     if (this.isMaximized) {
-                      WindowManager.getInstance().restoreWindow(this.windowId);
+                      // recover() switches MAXIMIZE/FULL_SCREEN → FLOATING (API11+) — the
+                      // documented inverse of maximize(). restore() is main-window-only
+                      // (restores a minimized MAIN window on 2in1, API14+); on a maximized
+                      // Float sub-window it is the wrong API. Mirrors tao set_maximized(false)
+                      // → recover_window (plugin-window bridge).
+                      WindowManager.getInstance().recoverWindow(this.windowId);
                     } else {
                       WindowManager.getInstance().maximizeWindow(this.windowId);
                     }
@@ -297,6 +302,17 @@ struct FloatPage {
             // duplication given Float dragging targets API14+ desktop.
             .onTouch((event: TouchEvent) => {
               if (event.type === TouchType.Down) {
+                // While maximized, startMoving() at touch-DOWN triggers WMS
+                // drag-off-maximize immediately (GetFullScreenToFloatingRect,
+                // pointer-anchored): the window jumps away before touch-UP, the
+                // UP lands out of region, and the ❐/—/✕ button click gesture is
+                // rejected — onClick never fires (device-verified 2026-08-27:
+                // "MOVE/UP event is out of region, try to reject click gesture").
+                // Drag while maximized is sacrificed; restore via the ❐ button
+                // (recoverWindow restores the pre-maximize rect).
+                if (this.isMaximized) {
+                  return;
+                }
                 if (deviceInfo.sdkApiVersion < 14) {
                   return;
                 }
@@ -415,6 +431,14 @@ struct FloatPage {
     .height('100%')
     .backgroundColor(Color.Transparent)
     .onKeyPreIme((event: KeyEvent) => {
+      // Block native clipboard shortcuts when with_clipboard(false) (ohos-webview-flag-clipboard)
+      if (event.type === KeyType.Down && this.acceleratorMatcher.matchesClipboardShortcut(event) && !isClipboardEnabled(this.windowId)) {
+        return true;
+      }
+      // Block native zoom hotkeys when with_zoom_hotkeys(false) (ohos-webview-flag-zoom-hotkeys)
+      if (event.type === KeyType.Down && this.acceleratorMatcher.matchesZoomShortcut(event) && !isZoomHotkeysEnabled(this.windowId)) {
+        return true;
+      }
       if (event.type === KeyType.Down && this.acceleratorMatcher.matches(event)) {
         const matchedItem = this.acceleratorMatcher.getMatchedItem();
         if (matchedItem) {
